@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cat-companion-backend"
+version = "0.2.0"
+description = "Safety-gated RAG backend for a cat companion application"
+readme = "README.md"
+requires-python = ">=3.11,<4"
+dependencies = [
+    "fastapi==0.116.1",
+    "httpx==0.28.1",
+    "pydantic==2.11.7",
+    "pydantic-settings==2.10.1",
+    "psycopg[binary]==3.2.9",
+    "psycopg-pool==3.2.6",
+    "tenacity==9.1.2",
+    "uvicorn==0.35.0",
+]
+
+[project.optional-dependencies]
+local-reranker = [
+    "sentence-transformers==5.1.0",
+]
+test = [
+    "mypy==1.14.1",
+    "pytest==8.4.1",
+    "pytest-asyncio==1.1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+follow_imports_for_stubs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "sentence_transformers",
+    "sentence_transformers.*",
+    "numpy",
+    "numpy.*",
+    "torch",
+    "torch.*",
+    "transformers",
+    "transformers.*",
+    "sklearn",
+    "sklearn.*",
+]
+follow_imports = "skip"
