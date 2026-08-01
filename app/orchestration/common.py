@@ -31,6 +31,8 @@ async def record_health_safely(
     memory: CatMemoryService,
     request: HealthChatRequest,
     assistant_message: str,
+    *,
+    compact: bool = True,
 ) -> UUID:
     """Memory failure never changes or leaks a health response."""
     try:
@@ -45,6 +47,7 @@ async def record_health_safely(
             corner=Corner.HEALTH,
             user_message=user_message,
             assistant_message=assistant_message,
+            compact=compact,
         )
     except Exception:
         logger.exception("health memory write failed without affecting response")

@@ -27,6 +27,21 @@ class EnergyLevel(IntEnum):
     FIVE = 5
 
 
+class CatSex(str, Enum):
+    """Owner-reported sex, with an explicit unknown value for genuine uncertainty."""
+
+    MALE = "male"
+    FEMALE = "female"
+    UNKNOWN = "unknown"
+
+
+class AuthStatus(str, Enum):
+    """Whether an auth attempt produced a usable session."""
+
+    ACTIVE = "active"
+    CONFIRMATION_REQUIRED = "confirmation_required"
+
+
 class Corner(str, Enum):
     """The four deliberately separate product surfaces."""
 
@@ -86,6 +101,13 @@ class ConfidenceLevel(str, Enum):
     WELL_ESTABLISHED = "well-established"
     GENERAL = "general"
     VARIES_BY_CAT = "varies-by-cat"
+
+
+class BehaviorAnswerMode(str, Enum):
+    """Whether a behavior answer is sourced or explicitly general knowledge."""
+
+    CORPUS_GROUNDED = "corpus_grounded"
+    GENERAL_KNOWLEDGE = "general_knowledge"
 
 
 class FunFactCategory(str, Enum):

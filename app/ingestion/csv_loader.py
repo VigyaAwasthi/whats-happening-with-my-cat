@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.ingestion.models import FunFactIngestRow
 from app.schemas.corpora import BehaviorEntry, HealthEntry
+from app.url_safety import require_valid_source_url
 
 
 PIPE_DELIMITER = " | "
@@ -102,7 +103,11 @@ def load_fun_facts(path: Path) -> tuple[list[FunFactIngestRow], int]:
                     "tone": row["tone"],
                     "personalization_hook": row["personalization_hook"],
                     "source_note": row["source_note"],
-                    "source_url": row["source_url"] or None,
+                    "source_url": require_valid_source_url(
+                        row["source_url"] or None,
+                        entry_id=row["id"],
+                        field_name="source_url",
+                    ),
                 }
             )
         )
@@ -119,16 +124,25 @@ def _read_rows(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _sources(row: dict[str, str], maximum: int) -> list[dict[str, str]]:
-    sources: list[dict[str, str]] = []
+def _sources(
+    row: dict[str, str], maximum: int
+) -> list[dict[str, str | None]]:
+    sources: list[dict[str, str | None]] = []
     for index in range(1, maximum + 1):
         title = row[f"source_{index}_title"]
         organization = row[f"source_{index}_org"]
-        url = row[f"source_{index}_url"]
-        if not title and not organization and not url:
+        raw_url = row[f"source_{index}_url"]
+        if not title and not organization and not raw_url:
             continue
-        if not title or not organization or not url:
-            raise ValueError(f"incomplete source {index} on entry {row['id']!r}")
+        if not title or not organization:
+            raise ValueError(
+                f"incomplete source {index} on entry {row['id']!r}"
+            )
+        url = require_valid_source_url(
+            raw_url or None,
+            entry_id=row["id"],
+            field_name=f"source_{index}_url",
+        )
         sources.append(
             {"title": title, "organization": organization, "url": url}
         )

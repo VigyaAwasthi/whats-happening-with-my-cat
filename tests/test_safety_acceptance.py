@@ -27,6 +27,7 @@ from app.safety.red_flags import DeterministicRedFlagChecker
 from app.schemas.api import BehaviorChatRequest, HealthChatRequest
 from app.schemas.enums import (
     AppetiteChange,
+    BehaviorAnswerMode,
     BodySystem,
     ConfidenceLevel,
     Corner,
@@ -37,6 +38,7 @@ from app.schemas.enums import (
     VomitingFrequency,
 )
 from app.schemas.llm import (
+    BehaviorCitation,
     BehaviorInterpretation,
     GroundednessVerdict,
     HealthSignalCheck,
@@ -339,6 +341,9 @@ async def test_behavior_vomiting_blood_nudges_without_interpretation() -> None:
         fast_model="fast",
         behavior_model="behavior-strong",
         health_signal_threshold=0.7,
+        health_signal_medium_threshold=0.4,
+        behavior_grounding_min_query_coverage=0.65,
+        behavior_grounding_min_query_terms=2,
         behavior_retriever=StaticBehaviorRetriever(),
         memory_retriever=EmptyMemoryRetriever(),
         memory_writer=memory,
@@ -388,6 +393,9 @@ async def test_cat_switch_creates_new_session_without_context() -> None:
         fast_model="fast",
         behavior_model="behavior-strong",
         health_signal_threshold=0.7,
+        health_signal_medium_threshold=0.4,
+        behavior_grounding_min_query_coverage=0.65,
+        behavior_grounding_min_query_terms=2,
         behavior_retriever=StaticBehaviorRetriever(),
         memory_retriever=EmptyMemoryRetriever(),
         memory_writer=memory,
@@ -535,11 +543,22 @@ def _default_value(output_type: type[object]) -> object | None:
             summary="summary", salient_facts=[], covers_message_count=1
         )
     if output_type is BehaviorInterpretation:
+        source = BEHAVIOR_ENTRY.sources[0]
         return BehaviorInterpretation(
             interpretation=BEHAVIOR_ENTRY.summary,
+            answer_mode=BehaviorAnswerMode.CORPUS_GROUNDED,
             confidence=ConfidenceLevel.GENERAL,
             reasoning="source",
             cited_entry_ids=[BEHAVIOR_ENTRY.id],
+            retrieved_entry_ids=[BEHAVIOR_ENTRY.id],
+            cited_entries=[
+                BehaviorCitation(
+                    entry_id=BEHAVIOR_ENTRY.id,
+                    title=source.title,
+                    organization=source.organization,
+                    url=source.url,
+                )
+            ],
             suggested_clarifying_questions=[],
             medical_nudge=False,
         )

@@ -20,11 +20,9 @@ class SourceRef(ContractModel):
 
     title: str = Field(min_length=1, description="Source title.")
     organization: str = Field(min_length=1, description="Publishing organization.")
-    url: str = Field(
-        min_length=1,
-        description=(
-            "Source URL stored verbatim; verification markers are intentionally allowed."
-        ),
+    url: str | None = Field(
+        default=None,
+        description="Validated absolute source URL, or null when no link is confirmed.",
     )
 
 
@@ -122,7 +120,8 @@ class FunFact(ContractModel):
     )
     source_note: str = Field(min_length=1, description="Curator-facing source note.")
     source_url: str | None = Field(
-        default=None, description="Optional source URL stored verbatim."
+        default=None,
+        description="Validated absolute source URL, or null when no link is confirmed.",
     )
 
     @model_validator(mode="after")

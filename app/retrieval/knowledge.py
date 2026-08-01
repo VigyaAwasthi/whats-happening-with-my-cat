@@ -1,6 +1,7 @@
 """Phase 1 retriever interface implementations."""
 
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -87,7 +88,11 @@ class PostgresVetKnowledgeRetriever(VetKnowledgeRetriever):
 
 
 class PostgresBehaviorKnowledgeRetriever(BehaviorKnowledgeRetriever):
-    """Hybrid child-match/parent-return implementation for behavior knowledge."""
+    """Hybrid parent retrieval that preserves candidates for evidence selection.
+
+    Behavior reranker magnitudes are not calibrated relevance probabilities, so
+    this layer ranks candidates but does not discard them by absolute score.
+    """
 
     def __init__(
         self,
@@ -97,14 +102,12 @@ class PostgresBehaviorKnowledgeRetriever(BehaviorKnowledgeRetriever):
         *,
         rerank_pool_size: int = 20,
         final_size: int = 5,
-        minimum_rerank_score: float = 0.05,
     ) -> None:
         self._repository = repository
         self._embedder = embedder
         self._reranker = reranker
         self._rerank_pool_size = rerank_pool_size
         self._final_size = final_size
-        self._minimum_rerank_score = minimum_rerank_score
 
     async def retrieve(
         self, request: BehaviorKnowledgeRetrieverInput
@@ -128,7 +131,6 @@ class PostgresBehaviorKnowledgeRetriever(BehaviorKnowledgeRetriever):
                 scores,
                 self._reranker,
                 self._final_size,
-                self._minimum_rerank_score,
             )
             return BehaviorKnowledgeRetrieverOutput(
                 entries=ranked, error=rerank_error
@@ -160,7 +162,7 @@ def infer_body_systems(query: str) -> list[BodySystem]:
     matches = [
         system
         for system, terms in mappings.items()
-        if any(term in text for term in terms)
+        if any(re.search(rf"\b{re.escape(term)}", text) for term in terms)
     ]
     return matches[:1] if len(matches) == 1 else []
 
@@ -222,14 +224,15 @@ async def _rerank_behavior(
     scores: dict[str, tuple[float, float]],
     reranker: Reranker,
     final_size: int,
-    minimum_rerank_score: float,
 ) -> tuple[list[RankedBehaviorEntry], ToolError | None]:
     result = await reranker.rerank(
         query, [_behavior_document(entry) for entry in entries], final_size
     )
-    order = _accepted_rerank_items(
-        result, len(entries), final_size, minimum_rerank_score
-    )
+    # Do not threshold behavior candidates by raw reranker magnitude. The local
+    # MS-MARCO model produces saturated sigmoid scores (valid paraphrases can be
+    # near zero); orchestration selects sourced mode from rank agreement and
+    # deterministic coverage instead.
+    order = _accepted_rerank_items(result, len(entries), final_size, 0.0)
     ranked = []
     for item in order:
         entry = entries[item.index]

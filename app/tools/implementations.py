@@ -113,13 +113,13 @@ class PostgresProfileStore(ProfileStore):
             row = await self._database.fetch_one(
                 """
                 INSERT INTO cat_profiles (
-                    id, account_id, name, age_value, age_unit, breed,
+                    id, account_id, name, age_value, age_unit, breed, sex,
                     weight_value, weight_unit, energy_level, common_patterns,
                     known_conditions, photo_references, theme, created_at, updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s::jsonb, %s, %s
+                    %s, %s, %s, %s::jsonb, %s, %s
                 )
                 RETURNING *
                 """,
@@ -166,6 +166,7 @@ class PostgresProfileStore(ProfileStore):
                     age_value = %s,
                     age_unit = %s,
                     breed = %s,
+                    sex = %s,
                     weight_value = %s,
                     weight_unit = %s,
                     energy_level = %s,
@@ -182,6 +183,7 @@ class PostgresProfileStore(ProfileStore):
                     profile.age.value,
                     profile.age.unit.value,
                     profile.breed,
+                    profile.sex.value,
                     profile.weight.value,
                     profile.weight.unit.value,
                     profile.energy_level.value,
@@ -259,6 +261,7 @@ def _profile_values(profile: CatProfile) -> tuple[object, ...]:
         profile.age.value,
         profile.age.unit.value,
         profile.breed,
+        profile.sex.value,
         profile.weight.value,
         profile.weight.unit.value,
         profile.energy_level.value,

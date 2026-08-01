@@ -2,9 +2,19 @@
 
 from fastapi import APIRouter
 
-from app.api.routes import account, auth, cats, chat, facts, feedback, moments
+from app.api.routes import (
+    account,
+    auth,
+    cats,
+    chat,
+    facts,
+    feedback,
+    moments,
+    system,
+)
 
 router = APIRouter()
+router.include_router(system.router)
 router.include_router(auth.router)
 router.include_router(cats.router)
 router.include_router(chat.router)

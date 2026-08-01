@@ -85,8 +85,9 @@ class CatMemoryService:
         corner: Corner,
         user_message: str,
         assistant_message: str,
+        compact: bool = True,
     ) -> UUID:
-        """Write both sides under one cat scope and compact when over threshold."""
+        """Write both sides and optionally compact under the same cat scope."""
         session_id = await self._repository.ensure_session(
             cat_id, requested_session_id, corner
         )
@@ -96,7 +97,8 @@ class CatMemoryService:
         await self._repository.append_message(
             cat_id, session_id, MessageRole.ASSISTANT, assistant_message
         )
-        await self._compact_if_needed(cat_id, session_id)
+        if compact:
+            await self._compact_if_needed(cat_id, session_id)
         return session_id
 
     async def end_session(self, cat_id: UUID, session_id: UUID) -> None:

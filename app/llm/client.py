@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Generic, Protocol, TypeVar
@@ -16,6 +17,7 @@ from app.schemas.base import ContractModel
 from app.db import Database
 from app.schemas.enums import ToolErrorCode
 from app.schemas.llm import (
+    BehaviorCitation,
     BehaviorInterpretation,
     GroundednessVerdict,
     HealthSignalCheck,
@@ -25,6 +27,7 @@ from app.schemas.llm import (
 )
 from app.schemas.enums import (
     AppetiteChange,
+    BehaviorAnswerMode,
     BodySystem,
     ConfidenceLevel,
     TriageResponseKind,
@@ -140,6 +143,35 @@ class TokenPricing:
     cache_read_per_million_usd: Decimal
 
 
+MONTHLY_WINDOW = "monthly"
+LIFETIME_WINDOW = "lifetime"
+
+
+def spend_budget_key(window: str, *, now: datetime | None = None) -> str:
+    """Return the ledger row a spend window is accounted against.
+
+    The window is encoded in the key itself, so a new period simply starts
+    accumulating against a fresh row. Nothing has to run at the boundary: no
+    cron, no migration, no operator action. A cap reached in one month stops
+    blocking calls the instant the next month's key comes into use.
+
+    ``monthly`` is the UTC calendar month — the boundary is 00:00 UTC on the
+    first. ``lifetime`` reproduces the original cumulative behavior.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if window == MONTHLY_WINDOW:
+        return f"global:{moment.astimezone(timezone.utc):%Y-%m}"
+    return "global"
+
+
+@dataclass(frozen=True)
+class SpendReservation:
+    """A conservative pre-call hold, bound to the window row that accepted it."""
+
+    amount: Decimal
+    budget_key: str
+
+
 class SpendLedger(Protocol):
     """Atomic cumulative spend storage shared by every application worker."""
 
@@ -245,17 +277,25 @@ class SpendTracker:
         cap_usd: Decimal,
         pricing: Mapping[str, TokenPricing],
         ledger: SpendLedger | None = None,
-        budget_key: str = "global",
+        window: str = LIFETIME_WINDOW,
+        warning_ratio: float = 0.8,
     ) -> None:
         self._cap = cap_usd
         self._pricing = dict(pricing)
         self._ledger = ledger or InMemorySpendLedger()
-        self._budget_key = budget_key
+        self._window = window
+        self._warning_threshold = cap_usd * Decimal(str(warning_ratio))
         self._last_known_total = Decimal("0")
+        self._warned_for_key: str | None = None
+
+    @property
+    def budget_key(self) -> str:
+        """The ledger row the current instant accounts against."""
+        return spend_budget_key(self._window)
 
     async def reserve(
         self, model: str, exact_input: int, max_output: int
-    ) -> Decimal | None:
+    ) -> SpendReservation | None:
         pricing = self._model_pricing(model)
         conservative_input_rate = max(
             pricing.input_per_million_usd,
@@ -268,18 +308,27 @@ class SpendTracker:
             input_rate=conservative_input_rate,
             output_rate=pricing.output_per_million_usd,
         )
-        total = await self._ledger.try_reserve(
-            self._budget_key, amount, self._cap
-        )
+        # Resolve the key once and carry it on the reservation, so a window
+        # boundary crossed mid-call reconciles against the row that was
+        # actually debited rather than the new period's empty row.
+        budget_key = self.budget_key
+        total = await self._ledger.try_reserve(budget_key, amount, self._cap)
         if total is None:
+            logger.error(
+                "llm_spend_cap_reached budget_key=%s cap_usd=%s window=%s",
+                budget_key,
+                self._cap,
+                self._window,
+            )
             return None
         self._last_known_total = total
-        return amount
+        self._warn_if_approaching_cap(budget_key, total)
+        return SpendReservation(amount=amount, budget_key=budget_key)
 
     async def reconcile(
         self,
         model: str,
-        reservation: Decimal,
+        reservation: SpendReservation,
         *,
         actual_input: int,
         actual_output: int,
@@ -308,7 +357,23 @@ class SpendTracker:
             )
         )
         self._last_known_total = await self._ledger.adjust(
-            self._budget_key, actual - reservation
+            reservation.budget_key, actual - reservation.amount
+        )
+        self._warn_if_approaching_cap(reservation.budget_key, self._last_known_total)
+
+    def _warn_if_approaching_cap(self, budget_key: str, total: Decimal) -> None:
+        """Warn once per worker per window, well before calls start failing."""
+        if total < self._warning_threshold or self._warned_for_key == budget_key:
+            return
+        self._warned_for_key = budget_key
+        logger.warning(
+            "llm_spend_approaching_cap budget_key=%s spent_usd=%s cap_usd=%s "
+            "used_ratio=%.3f window=%s",
+            budget_key,
+            total,
+            self._cap,
+            float(total / self._cap) if self._cap else 0.0,
+            self._window,
         )
 
     @property
@@ -317,8 +382,8 @@ class SpendTracker:
         return self._last_known_total
 
     async def current_spend(self) -> Decimal:
-        """Read the authoritative cumulative value from the shared ledger."""
-        return await self._ledger.total(self._budget_key)
+        """Read the authoritative value for the current window from the ledger."""
+        return await self._ledger.total(self.budget_key)
 
     def _model_pricing(self, model: str) -> TokenPricing:
         try:
@@ -547,7 +612,7 @@ def _payload(
 async def _reconcile_spend_safely(
     tracker: SpendTracker,
     model: str,
-    reservation: Decimal,
+    reservation: SpendReservation,
     actual_input: int,
     actual_output: int,
     cache_write_input: int,
@@ -638,13 +703,55 @@ def _development_value(
             {"passed": True, "unsupported_claims": [], "notes": "development"}
         )
     if output_type is BehaviorInterpretation:
+        ids = _context_ids(context)
+        if ids:
+            source = _context_behavior_source(context, ids[0])
+            return output_type.model_validate(
+                {
+                    "interpretation": (
+                        "This may be normal play, curiosity, or attention-seeking "
+                        "behavior in the context described."
+                    ),
+                    "answer_mode": BehaviorAnswerMode.CORPUS_GROUNDED.value,
+                    "confidence": ConfidenceLevel.GENERAL.value,
+                    "reasoning": (
+                        "The interpretation is limited to the retrieved behavior "
+                        "context."
+                    ),
+                    "cited_entry_ids": [ids[0]],
+                    "retrieved_entry_ids": ids,
+                    "cited_entries": [
+                        BehaviorCitation(
+                            entry_id=ids[0],
+                            title=source[0],
+                            organization=source[1],
+                            url=source[2],
+                        ).model_dump(mode="json")
+                    ],
+                    "suggested_clarifying_questions": [],
+                    "medical_nudge": False,
+                }
+            )
+        profile = _context_profile_facts(context)
         return output_type.model_validate(
             {
-                "interpretation": "This may be normal play or attention-seeking behavior.",
-                "confidence": ConfidenceLevel.GENERAL.value,
-                "reasoning": "The interpretation is limited to the retrieved behavior context.",
-                "cited_entry_ids": _context_ids(context)[:1],
-                "suggested_clarifying_questions": [],
+                "interpretation": (
+                    "That sounds like a curious cat-specific routine. The location, "
+                    "timing, and what happens next can help distinguish play, comfort, "
+                    "attention-seeking, and simple sensory interest."
+                ),
+                "answer_mode": BehaviorAnswerMode.GENERAL_KNOWLEDGE.value,
+                "confidence": ConfidenceLevel.VARIES_BY_CAT.value,
+                "reasoning": (
+                    "This is general feline understanding personalized with: "
+                    + (", ".join(profile) if profile else "the active cat profile")
+                ),
+                "cited_entry_ids": [],
+                "retrieved_entry_ids": [],
+                "cited_entries": [],
+                "suggested_clarifying_questions": [
+                    "What usually happens immediately before this?"
+                ],
                 "medical_nudge": False,
             }
         )
@@ -677,3 +784,29 @@ def _context_ids(context: str) -> list[str]:
         for line in context.splitlines()
         if line.startswith("ENTRY_ID: ")
     ]
+
+
+def _context_behavior_source(
+    context: str, entry_id: str
+) -> tuple[str, str, str | None]:
+    """Read the development context convention used only by the local stub."""
+    marker = f"ENTRY_ID: {entry_id}"
+    block = context.partition(marker)[2].split("\n\n", 1)[0]
+    source_line = next(
+        (line.removeprefix("SOURCES: ") for line in block.splitlines() if line.startswith("SOURCES: ")),
+        "",
+    )
+    first = source_line.split(" | ", 1)[0]
+    parts = [part.strip() for part in first.split(" :: ")]
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2] or None
+    return "Curated behavior source", "Curated corpus", None
+
+
+def _context_profile_facts(context: str) -> list[str]:
+    """Extract local-stub personalization inputs from the explicit profile block."""
+    marker = "ACTIVE CAT PROFILE:\n"
+    if marker not in context:
+        return []
+    block = context.partition(marker)[2].split("\n\n", 1)[0]
+    return [line.strip() for line in block.splitlines() if line.strip()]

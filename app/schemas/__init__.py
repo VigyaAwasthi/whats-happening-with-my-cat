@@ -19,6 +19,7 @@ from app.schemas.domain import (
     NotificationSettings,
 )
 from app.schemas.llm import (
+    BehaviorCitation,
     BehaviorInterpretation,
     Claim,
     GroundednessVerdict,
@@ -34,15 +35,18 @@ from app.schemas.memory import (
     SessionMemory,
     SessionMessage,
 )
+from app.schemas.enums import CatSex
 
 __all__ = [
     "Account",
     "AccountPreferences",
     "BehaviorEntry",
+    "BehaviorCitation",
     "BehaviorInterpretation",
     "CatAge",
     "CatProfile",
     "CatRoster",
+    "CatSex",
     "CatTheme",
     "CatWeight",
     "Claim",

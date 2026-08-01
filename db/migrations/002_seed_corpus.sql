@@ -9,7 +9,7 @@
 --
 -- Pipe-delimited list fields use the exact delimiter ` | ` and must be split
 -- into native text[] values on import. Empty list cells map to ARRAY[]::text[].
--- Source URL strings, including `[VERIFY exact subpage]`, must be stored verbatim.
+-- Source URLs must be absolute HTTP(S) values or NULL; verification markers and placeholders must fail ingestion.
 --
 -- MASTER_health_corpus.csv -> health_entries
 -- id                    -> health_entries.id

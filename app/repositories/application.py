@@ -9,8 +9,10 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 import httpx
+from fastapi import status
 
 from app.db import Database
+from app.errors import APIErrorCode, APIErrorResponse, ApplicationError
 from app.ingestion.csv_loader import load_fun_facts
 from app.schemas.api import (
     AccountExportResponse,
@@ -34,7 +36,7 @@ from app.schemas.domain import (
     Moment,
     NotificationSettings,
 )
-from app.schemas.enums import AgeUnit, EnergyLevel, WeightUnit
+from app.schemas.enums import AgeUnit, AuthStatus, CatSex, EnergyLevel, WeightUnit
 from app.schemas.memory import LongTermMemory, SessionMemory, SessionMessage
 
 logger = logging.getLogger(__name__)
@@ -124,25 +126,33 @@ class SupabaseAuthService:
         anon_key: str,
         service_role_key: str,
         database: Database,
+        email_redirect_url: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._anon_key = anon_key
         self._service_role_key = service_role_key
         self._database = database
+        self._email_redirect_url = email_redirect_url
         self._client = client or httpx.AsyncClient(
             base_url=supabase_url.rstrip("/"), timeout=20
         )
 
     async def sign_up(self, request: AuthSessionRequest) -> AuthSessionResponse:
+        body: dict[str, Any] = {
+            "email": request.email,
+            "password": request.password.get_secret_value(),
+        }
+        if self._email_redirect_url:
+            # Where Supabase lands the user after the confirmation link. Must be
+            # registered under Auth -> URL Configuration -> Redirect URLs, or
+            # Supabase silently substitutes the project's Site URL.
+            body["email_redirect_to"] = self._email_redirect_url
         response = await self._client.post(
             "/auth/v1/signup",
             headers={"apikey": self._anon_key},
-            json={
-                "email": request.email,
-                "password": request.password.get_secret_value(),
-            },
+            json=body,
         )
-        response.raise_for_status()
+        _raise_for_auth_status(response)
         payload = response.json()
         user = payload.get("user")
         if not isinstance(user, dict) or user.get("id") is None:
@@ -164,8 +174,10 @@ class SupabaseAuthService:
                 ),
             ),
         )
-        # Deployment invariant: Supabase email confirmation remains disabled while
-        # this response contract requires session tokens immediately after sign-up.
+        # With email confirmation enabled, Supabase creates the identity but
+        # issues no session. The internal account row above is written either
+        # way, so confirming the email is all that stands between the user and
+        # a working sign-in.
         return _auth_response(payload)
 
     async def sign_in(self, request: AuthSessionRequest) -> AuthSessionResponse:
@@ -177,7 +189,7 @@ class SupabaseAuthService:
                 "password": request.password.get_secret_value(),
             },
         )
-        response.raise_for_status()
+        _raise_for_auth_status(response)
         return _auth_response(response.json())
 
     async def resolve_account(self, bearer_token: str | None) -> UUID | None:
@@ -249,11 +261,14 @@ class PostgresApplicationRepository:
         row = await self._database.fetch_one(
             """
             INSERT INTO cat_profiles (
-                id, account_id, name, age_value, age_unit, breed,
+                id, account_id, name, age_value, age_unit, breed, sex,
                 weight_value, weight_unit, energy_level, common_patterns,
                 known_conditions, photo_references, theme
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s::jsonb
+            )
             RETURNING *
             """,
             (
@@ -263,6 +278,7 @@ class PostgresApplicationRepository:
                 request.age.value,
                 request.age.unit.value,
                 request.breed,
+                request.sex.value,
                 request.weight.value,
                 request.weight.unit.value,
                 request.energy_level.value,
@@ -313,6 +329,7 @@ class PostgresApplicationRepository:
                 age_value = %s,
                 age_unit = %s,
                 breed = %s,
+                sex = %s,
                 weight_value = %s,
                 weight_unit = %s,
                 energy_level = %s,
@@ -332,6 +349,11 @@ class PostgresApplicationRepository:
                     request.breed
                     if "breed" in request.model_fields_set
                     else current["breed"]
+                ),
+                (
+                    request.sex.value
+                    if request.sex is not None
+                    else current.get("sex") or CatSex.UNKNOWN.value
                 ),
                 weight_value,
                 weight_unit,
@@ -587,6 +609,7 @@ class InMemoryApplicationRepository:
             name=request.name,
             age=request.age,
             breed=request.breed,
+            sex=request.sex,
             weight=request.weight,
             energy_level=request.energy_level,
             common_patterns=request.common_patterns,
@@ -609,6 +632,7 @@ class InMemoryApplicationRepository:
             key: getattr(request, key)
             for key in request.model_fields_set
             if key != "cat_id"
+            and not (key == "sex" and request.sex is None)
         }
         profile = current.model_copy(
             update={**updates, "updated_at": datetime.now(timezone.utc)}
@@ -738,18 +762,96 @@ def development_account(account_id: UUID) -> Account:
     )
 
 
+def _raise_for_auth_status(response: httpx.Response) -> None:
+    """Translate a Supabase Auth failure into a typed, safe API error.
+
+    Signing in before confirming the email is an expected, common outcome once
+    confirmation is enabled — not a server fault. Left to ``raise_for_status``
+    it surfaced as an opaque 500, so the frontend could not tell the user the
+    one thing that would fix it.
+
+    Supabase's own error text is never forwarded; only the mapped message is.
+    """
+    if response.is_success:
+        return
+    detail = ""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            detail = str(
+                body.get("error_code")
+                or body.get("msg")
+                or body.get("error_description")
+                or body.get("error")
+                or ""
+            ).casefold()
+    except ValueError:
+        detail = ""
+
+    if "not confirmed" in detail or "email_not_confirmed" in detail:
+        code, message, status_code = (
+            APIErrorCode.EMAIL_NOT_CONFIRMED,
+            "Confirm your email address first. Check your inbox for the link.",
+            status.HTTP_403_FORBIDDEN,
+        )
+    elif "already registered" in detail or "already been registered" in detail:
+        code, message, status_code = (
+            APIErrorCode.EMAIL_ALREADY_REGISTERED,
+            "That email already has an account. Try signing in instead.",
+            status.HTTP_409_CONFLICT,
+        )
+    elif response.status_code == 429:
+        code, message, status_code = (
+            APIErrorCode.RATE_LIMITED,
+            "Too many attempts. Wait a moment and try again.",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+    elif response.status_code in {400, 401, 403, 422}:
+        code, message, status_code = (
+            APIErrorCode.INVALID_CREDENTIALS,
+            "That email and password combination was not accepted.",
+            status.HTTP_401_UNAUTHORIZED,
+        )
+    else:
+        logger.error(
+            "supabase auth call failed status=%s", response.status_code
+        )
+        code, message, status_code = (
+            APIErrorCode.SERVICE_UNAVAILABLE,
+            "Accounts are temporarily unavailable. Try again shortly.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    raise ApplicationError(
+        status_code,
+        APIErrorResponse(code=code, message=message, retryable=status_code >= 500),
+    )
+
+
 def _auth_response(payload: Mapping[str, Any]) -> AuthSessionResponse:
+    """Map a Supabase auth payload onto the typed session-or-pending contract.
+
+    Supabase signals "email confirmation required" by returning the user
+    without session material: either ``session: null`` or a bare user object
+    with no ``access_token``. Both shapes mean the same thing, so the absence
+    of a token is the discriminator rather than any one field's presence.
+    """
     session = payload.get("session")
     source = session if isinstance(session, dict) else payload
+    access_token = source.get("access_token")
+    refresh_token = source.get("refresh_token")
+    if not access_token or not refresh_token:
+        return AuthSessionResponse(status=AuthStatus.CONFIRMATION_REQUIRED)
     return AuthSessionResponse(
-        access_token=source["access_token"],
-        refresh_token=source["refresh_token"],
+        status=AuthStatus.ACTIVE,
+        access_token=access_token,
+        refresh_token=refresh_token,
         expires_in_seconds=source.get("expires_in", 3600),
     )
 
 
 def _development_auth_response() -> AuthSessionResponse:
     return AuthSessionResponse(
+        status=AuthStatus.ACTIVE,
         access_token="development-token",
         refresh_token="development-refresh",
         expires_in_seconds=3600,
@@ -779,6 +881,7 @@ def _cat_profile(row: Mapping[str, Any]) -> CatProfile:
         name=row["name"],
         age=CatAge(value=row["age_value"], unit=AgeUnit(row["age_unit"])),
         breed=row["breed"],
+        sex=CatSex(row.get("sex") or CatSex.UNKNOWN.value),
         weight=CatWeight(
             value=row["weight_value"], unit=WeightUnit(row["weight_unit"])
         ),

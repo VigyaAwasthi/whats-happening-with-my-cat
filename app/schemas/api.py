@@ -18,6 +18,8 @@ from app.schemas.domain import (
     Moment,
 )
 from app.schemas.enums import (
+    AuthStatus,
+    CatSex,
     Corner,
     EnergyLevel,
     FeedbackThumb,
@@ -35,16 +37,51 @@ class AuthSessionRequest(ContractModel):
 
 
 class AuthSessionResponse(ContractModel):
-    """Supabase-issued session material returned by the auth wrapper."""
+    """Result of an auth attempt: either a live session or a pending confirmation.
 
-    access_token: str = Field(
-        min_length=1, description="Short-lived Supabase access token."
+    With Supabase email confirmation enabled — required in production — sign-up
+    does **not** return session tokens. The identity exists but is unusable
+    until the emailed link is followed. The previous contract could not express
+    that state: it required tokens on every response, so the only way to
+    satisfy it was to leave email confirmation switched off.
+
+    ``status`` is the discriminator. Callers must branch on it before reading
+    ``access_token``; the validator guarantees the token fields are all present
+    together or all absent together, so there is no half-populated session.
+    """
+
+    status: AuthStatus = Field(
+        default=AuthStatus.ACTIVE,
+        description="Whether a usable session was issued or confirmation is pending.",
     )
-    refresh_token: str = Field(min_length=1, description="Supabase refresh token.")
+    access_token: str | None = Field(
+        default=None,
+        description="Short-lived Supabase access token; null while unconfirmed.",
+    )
+    refresh_token: str | None = Field(
+        default=None,
+        description="Supabase refresh token; null while unconfirmed.",
+    )
     expires_in_seconds: Annotated[
-        int,
-        Field(gt=0, description="Access-token lifetime in seconds."),
-    ]
+        int | None,
+        Field(default=None, gt=0, description="Access-token lifetime in seconds."),
+    ] = None
+
+    @model_validator(mode="after")
+    def session_material_matches_status(self) -> "AuthSessionResponse":
+        """Never emit a partially populated session for either status."""
+        material = (self.access_token, self.refresh_token, self.expires_in_seconds)
+        if self.status is AuthStatus.ACTIVE:
+            if any(value is None or value == "" for value in material):
+                raise ValueError(
+                    "an active auth session requires access token, refresh token, "
+                    "and expiry"
+                )
+        elif any(value is not None for value in material):
+            raise ValueError(
+                "a confirmation-pending response must not carry session material"
+            )
+        return self
 
 
 class CatCreateRequest(ContractModel):
@@ -56,6 +93,10 @@ class CatCreateRequest(ContractModel):
     name: str = Field(min_length=1, max_length=100, description="Cat display name.")
     age: CatAge = Field(description="Owner-reported structured age.")
     breed: str | None = Field(default=None, description="Optional free-text breed.")
+    sex: CatSex = Field(
+        default=CatSex.UNKNOWN,
+        description="Optional owner-reported sex; defaults to unknown.",
+    )
     weight: CatWeight = Field(description="Owner-reported structured weight.")
     energy_level: EnergyLevel = Field(description="Bounded energy level.")
     common_patterns: str = Field(description="Free-text common behavior patterns.")
@@ -77,6 +118,10 @@ class CatPatchRequest(ContractModel):
     )
     age: CatAge | None = Field(default=None, description="Replacement structured age.")
     breed: str | None = Field(default=None, description="Replacement free-text breed.")
+    sex: CatSex | None = Field(
+        default=None,
+        description="Replacement owner-reported sex; use unknown when unsure.",
+    )
     weight: CatWeight | None = Field(
         default=None, description="Replacement structured weight."
     )

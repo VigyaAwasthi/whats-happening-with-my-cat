@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from collections.abc import Sequence
 
 from app.llm.client import ModelPurpose, StructuredLLMClient
@@ -13,11 +14,16 @@ from app.orchestration.common import (
 )
 from app.prompts.v1 import HEALTH_SYSTEM_PROMPT_V1, SYMPTOM_INTAKE_SYSTEM_PROMPT_V1
 from app.safety.groundedness import CompositeGroundednessValidator
-from app.safety.red_flags import DeterministicRedFlagChecker, canned_response
+from app.safety.red_flags import (
+    DeterministicRedFlagChecker,
+    canned_response,
+    canned_response_text,
+)
 from app.schemas.api import HealthChatRequest, HealthChatResponse
 from app.schemas.corpora import HealthEntry
-from app.schemas.enums import Corner, TriageResponseKind, UrgencyTier
+from app.schemas.enums import CatSex, Corner, TriageResponseKind, UrgencyTier
 from app.schemas.llm import Claim, SymptomIntake, TriageResult
+from app.url_safety import safe_source_url
 from app.tools.contracts import (
     GroundingEvidence,
     MemoryRetriever,
@@ -29,13 +35,6 @@ from app.tools.contracts import (
 )
 
 logger = logging.getLogger(__name__)
-_URGENCY_PRIORITY = {
-    UrgencyTier.ROUTINE: 0,
-    UrgencyTier.MONITOR: 1,
-    UrgencyTier.URGENT: 2,
-    UrgencyTier.EMERGENCY: 3,
-}
-
 
 class HealthOrchestrator:
     """Readable fail-closed health control flow with no hidden framework."""
@@ -61,10 +60,12 @@ class HealthOrchestrator:
         self._red_flags = red_flags
         self._groundedness = groundedness
 
-    async def handle(self, request: HealthChatRequest) -> HealthChatResponse:
+    async def handle(
+        self, request: HealthChatRequest, cat_sex: CatSex = CatSex.UNKNOWN
+    ) -> HealthChatResponse:
         """Execute the strict flow and contain every operational exception."""
         try:
-            return await self._handle(request)
+            return await self._handle(request, cat_sex)
         except Exception:
             logger.exception("health orchestration failed closed")
             fallback = no_reliable_information()
@@ -73,13 +74,15 @@ class HealthOrchestrator:
             )
             return HealthChatResponse(session_id=session_id, result=fallback)
 
-    async def _handle(self, request: HealthChatRequest) -> HealthChatResponse:
+    async def _handle(
+        self, request: HealthChatRequest, cat_sex: CatSex
+    ) -> HealthChatResponse:
         raw_text = request.message or ""
 
         # Gate 1: deterministic raw keyword screen runs before any LLM call.
         raw_result = self._red_flags.check_raw(raw_text)
         if raw_result.matched_rules:
-            return await self._canned(request, raw_result.canned_response_id)
+            return await self._canned(request, raw_result.canned_response_id, cat_sex)
 
         # A caller-supplied structured intake is also checked before any LLM call.
         if request.intake is not None:
@@ -87,7 +90,7 @@ class HealthOrchestrator:
             structured_result = self._red_flags.check_intake(intake)
             if structured_result.matched_rules:
                 return await self._canned(
-                    request, structured_result.canned_response_id
+                    request, structured_result.canned_response_id, cat_sex
                 )
         else:
             extracted = await self._llm.generate(
@@ -108,7 +111,7 @@ class HealthOrchestrator:
             intake = extracted.value
             combined = self._red_flags.check_both(raw_text, intake)
             if combined.matched_rules:
-                return await self._canned(request, combined.canned_response_id)
+                return await self._canned(request, combined.canned_response_id, cat_sex)
 
         query = raw_text or intake.model_dump_json()
         vet_output, memory_output, session_context = await asyncio.gather(
@@ -222,7 +225,10 @@ class HealthOrchestrator:
         return result.value
 
     async def _canned(
-        self, request: HealthChatRequest, response_id: str | None
+        self,
+        request: HealthChatRequest,
+        response_id: str | None,
+        cat_sex: CatSex,
     ) -> HealthChatResponse:
         if response_id is None:
             fallback = no_reliable_information()
@@ -239,12 +245,15 @@ class HealthOrchestrator:
         result = TriageResult(
             severity=response.severity,
             claims=[],
-            message=response.text,
+            message=canned_response_text(response_id, cat_sex),
             retrieved_entry_ids=[],
             response_kind=TriageResponseKind.EMERGENCY_CANNED,
         )
         session_id = await record_health_safely(
-            self._memory_writer, request, result.message
+            self._memory_writer,
+            request,
+            result.message,
+            compact=False,
         )
         return HealthChatResponse(session_id=session_id, result=result)
 
@@ -264,7 +273,7 @@ def _health_context(
             f"URGENCY: {entry.urgency_tier.value}\n"
             f"WHEN_TO_SEE_VET: {entry.when_to_see_vet}\n"
             f"RELATED_CONDITIONS: {' | '.join(entry.related_conditions)}\n"
-            f"SOURCES: {' | '.join(source.url for source in entry.sources)}"
+            f"SOURCES: {' | '.join(_health_source_context(source.title, source.organization, source.url) for source in entry.sources)}"
         )
     result = getattr(memory_output, "result", None)
     if result is not None:
@@ -332,36 +341,64 @@ def _dispose_health_draft(
         Claim(
             text=claim.text,
             source_entry_id=claim.source_entry_id,
+            source_title=(
+                by_id[claim.source_entry_id].sources[0].title
+                if by_id[claim.source_entry_id].sources
+                else None
+            ),
+            source_organization=(
+                by_id[claim.source_entry_id].sources[0].organization
+                if by_id[claim.source_entry_id].sources
+                else None
+            ),
             source_url=(
-                by_id[claim.source_entry_id].sources[0].url
+                safe_source_url(
+                    by_id[claim.source_entry_id].sources[0].url
+                )
                 if by_id[claim.source_entry_id].sources
                 else None
             ),
         )
         for claim in draft.claims
     ]
-    cited_ids = {claim.source_entry_id for claim in claims}
-    cited_entries = [
-        ranked for ranked in ranked_entries if ranked.entry_id in cited_ids
-    ]
-    severities = [draft.severity] + [
-        ranked.entry.urgency_tier for ranked in cited_entries
-    ]
-    severity = max(severities, key=_URGENCY_PRIORITY.__getitem__)
-    citations = "\n".join(
-        f"[{entry.entry_id}] {source.url}"
-        for entry in cited_entries
-        for source in entry.entry.sources
-    )
-    message = draft.message.rstrip()
-    if citations:
-        message = f"{message}\n\nSources:\n{citations}"
+    message = _sanitize_health_message(draft.message, claims)
     if not message.endswith(VET_REFERRAL_LINE):
         message = f"{message}\n\n{VET_REFERRAL_LINE}"
     return TriageResult(
-        severity=severity,
+        severity=draft.severity,
         claims=claims,
         message=message,
         retrieved_entry_ids=[entry.entry_id for entry in ranked_entries],
         response_kind=TriageResponseKind.TRIAGE,
     )
+
+
+def _health_source_context(
+    title: str, organization: str, url: str | None
+) -> str:
+    safe_url = safe_source_url(url)
+    label = f"{title} :: {organization}"
+    return f"{label} :: {safe_url}" if safe_url else label
+
+
+def _sanitize_health_message(message: str, claims: Sequence[Claim]) -> str:
+    """Remove model-emitted citation rendering; structured claims own attribution."""
+    without_section = re.sub(
+        r"(?is)\s*\b(?:sources?|citations?)\s*:.*\Z", "", message
+    )
+    without_urls = re.sub(r"https?://\S+", "", without_section)
+    without_ids = re.sub(r"\[[a-z0-9][a-z0-9-]*\]", "", without_urls)
+    cleaned = " ".join(without_ids.split()).strip()
+    return cleaned or " ".join(claim.text for claim in claims)
+
+
+def _format_health_source(
+    entry_id: str,
+    title: str,
+    organization: str,
+    url: str | None,
+) -> str:
+    """Format linked and unlinked sources without inventing a dead URL."""
+    label = f"[{entry_id}] {title} — {organization}"
+    safe_url = safe_source_url(url)
+    return f"{label}: {safe_url}" if safe_url else label

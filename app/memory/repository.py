@@ -12,6 +12,7 @@ from app.schemas.base import ContractModel
 from app.schemas.domain import CatAge, CatProfile, CatTheme, CatWeight
 from app.schemas.enums import (
     AgeUnit,
+    CatSex,
     Corner,
     EnergyLevel,
     MessageRole,
@@ -413,6 +414,7 @@ def _cat_profile(row: Mapping[str, Any]) -> CatProfile:
         name=str(row["name"]),
         age=CatAge(value=row["age_value"], unit=AgeUnit(row["age_unit"])),
         breed=None if row["breed"] is None else str(row["breed"]),
+        sex=CatSex(row.get("sex") or CatSex.UNKNOWN.value),
         weight=CatWeight(
             value=row["weight_value"], unit=WeightUnit(row["weight_unit"])
         ),

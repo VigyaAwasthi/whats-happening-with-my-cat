@@ -7,7 +7,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, Field, NonNegativeFloat, PositiveFloat
 
 from app.schemas.base import ContractModel
-from app.schemas.enums import AgeUnit, EnergyLevel, MomentKind, WeightUnit
+from app.schemas.enums import AgeUnit, CatSex, EnergyLevel, MomentKind, WeightUnit
 
 
 class NotificationSettings(ContractModel):
@@ -82,6 +82,10 @@ class CatProfile(ContractModel):
     breed: str | None = Field(
         default=None, description="Optional owner-reported breed as free text."
     )
+    sex: CatSex = Field(
+        default=CatSex.UNKNOWN,
+        description="Optional owner-reported sex; unknown is a valid lasting value.",
+    )
     weight: CatWeight = Field(description="Owner-reported structured weight.")
     energy_level: EnergyLevel = Field(description="Bounded owner-reported energy level.")
     common_patterns: str = Field(
@@ -127,4 +131,3 @@ class Moment(ContractModel):
         default=None, description="Optional date represented by this item."
     )
     created_at: AwareDatetime = Field(description="Timezone-aware creation time.")
-

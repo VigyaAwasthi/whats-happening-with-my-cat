@@ -1,0 +1,164 @@
+[
+  {
+    "id": "urinary-blockage-emergency",
+    "query": "He keeps trying to pee and nothing comes out",
+    "expected_entry_id": "urinary-blockage",
+    "expected_response_kind": "emergency_canned",
+    "should_retrieve": false,
+    "good_answer_contains": ["emergency", "veterinary"],
+    "notes": "The deterministic urinary-obstruction gate must stop before retrieval."
+  },
+  {
+    "id": "breathing-emergency",
+    "query": "Her breathing sounds unusual",
+    "expected_entry_id": "breathing-difficulty",
+    "expected_response_kind": "emergency_canned",
+    "should_retrieve": false,
+    "good_answer_contains": ["emergency", "veterinary"],
+    "notes": "Any respiratory mention in health is intentionally escalated."
+  },
+  {
+    "id": "lily-emergency",
+    "query": "She ate a leaf from a lily",
+    "expected_entry_id": "lily-toxicity",
+    "expected_response_kind": "emergency_canned",
+    "should_retrieve": false,
+    "good_answer_contains": ["emergency", "veterinary"],
+    "notes": "Lily exposure is a standalone coded trigger."
+  },
+  {
+    "id": "blood-in-urine",
+    "query": "I noticed pink urine in the litter box",
+    "expected_entry_id": "blood-in-urine",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Exact colloquial alias should retrieve the hematuria parent."
+  },
+  {
+    "id": "upper-respiratory-infection",
+    "query": "My cat is sneezing and has a runny nose",
+    "expected_entry_id": "uri-overview",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Sneezing and nasal discharge should map to the URI overview."
+  },
+  {
+    "id": "increased-thirst",
+    "query": "She is drinking much more water and peeing more",
+    "expected_entry_id": "increased-thirst",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "The paired thirst and urination pattern should retrieve this parent."
+  },
+  {
+    "id": "weight-loss",
+    "query": "He is getting skinny and I can see his ribs",
+    "expected_entry_id": "weight-loss",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Colloquial weight-loss aliases are explicitly curated."
+  },
+  {
+    "id": "dental-disease",
+    "query": "Her mouth smells bad and she keeps dropping food",
+    "expected_entry_id": "dental-disease",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Bad breath plus difficulty eating should retrieve dental disease."
+  },
+  {
+    "id": "house-soiling-health",
+    "query": "My cat pees on the bed instead of the litter box",
+    "expected_entry_id": "urinating-outside-litterbox",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Health owns the medical evaluation of a litter-box change."
+  },
+  {
+    "id": "hepatic-lipidosis",
+    "query": "Her appetite is gone and now her eyes look yellow",
+    "expected_entry_id": "hepatic-lipidosis",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Food refusal plus jaundice language should retrieve fatty liver guidance."
+  },
+  {
+    "id": "pancreatitis",
+    "query": "He has belly pain and keeps vomiting",
+    "expected_entry_id": "pancreatitis",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "The paired symptom language should surface the pancreatitis parent."
+  },
+  {
+    "id": "asthma",
+    "query": "The vet mentioned asthma after recurring coughing fits",
+    "expected_entry_id": "asthma-overview",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Explicit asthma terminology must survive lexical retrieval."
+  },
+  {
+    "id": "hyperthyroidism",
+    "query": "She eats constantly but keeps losing weight",
+    "expected_entry_id": "hyperthyroidism",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "The characteristic paired pattern should retrieve hyperthyroidism."
+  },
+  {
+    "id": "itchy-skin",
+    "query": "My cat is itchy and will not stop scratching",
+    "expected_entry_id": "excessive-scratching-skin",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Owner vocabulary should map to the skin parent."
+  },
+  {
+    "id": "hair-loss",
+    "query": "There are new bald spots and thinning fur",
+    "expected_entry_id": "hair-loss",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Both aliases are curated on the hair-loss entry."
+  },
+  {
+    "id": "fleas",
+    "query": "I found little black specks and think my cat has fleas",
+    "expected_entry_id": "fleas",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Exact flea aliases should yield high context precision."
+  },
+  {
+    "id": "ear-problem",
+    "query": "He keeps shaking his head and his ears look dirty",
+    "expected_entry_id": "ear-problems",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Head shaking and dirty ears should retrieve the ear parent."
+  },
+  {
+    "id": "constipation",
+    "query": "She keeps straining to poop and has not passed stool",
+    "expected_entry_id": "constipation",
+    "expected_response_kind": "triage",
+    "should_retrieve": true,
+    "good_answer_contains": ["veterinarian"],
+    "notes": "Defecation wording must not be confused with urinary obstruction."
+  }
+]

@@ -135,6 +135,13 @@ def _build_development(settings: RuntimeSettings) -> ApplicationServices:
         fast_model=settings.anthropic_fast_model,
         behavior_model=settings.anthropic_behavior_model,
         health_signal_threshold=settings.health_signal_threshold,
+        health_signal_medium_threshold=settings.health_signal_medium_threshold,
+        behavior_grounding_min_query_coverage=(
+            settings.behavior_grounding_min_query_coverage
+        ),
+        behavior_grounding_min_query_terms=(
+            settings.behavior_grounding_min_query_terms
+        ),
         behavior_retriever=InMemoryBehaviorKnowledgeRetriever(
             load_behavior(corpus_dir / "MASTER_behavior_corpus.csv")
         ),
@@ -176,6 +183,8 @@ async def _build_production(settings: RuntimeSettings) -> ApplicationServices:
             cap_usd=settings.hard_spend_cap_usd,
             pricing=_model_pricing(settings),
             ledger=PostgresSpendLedger(database),
+            window=settings.spend_window.value,
+            warning_ratio=settings.spend_warning_ratio,
         ),
     )
     memory_repository = PostgresMemoryRepository(database)
@@ -216,13 +225,19 @@ async def _build_production(settings: RuntimeSettings) -> ApplicationServices:
         fast_model=settings.anthropic_fast_model,
         behavior_model=settings.anthropic_behavior_model,
         health_signal_threshold=settings.health_signal_threshold,
+        health_signal_medium_threshold=settings.health_signal_medium_threshold,
+        behavior_grounding_min_query_coverage=(
+            settings.behavior_grounding_min_query_coverage
+        ),
+        behavior_grounding_min_query_terms=(
+            settings.behavior_grounding_min_query_terms
+        ),
         behavior_retriever=PostgresBehaviorKnowledgeRetriever(
             hybrid,
             embedder,
             reranker,
             rerank_pool_size=settings.retrieval_rerank_output_size,
             final_size=settings.retrieval_final_context_size,
-            minimum_rerank_score=settings.retrieval_min_rerank_score,
         ),
         memory_retriever=memory_retriever,
         memory_writer=memory_writer,
@@ -237,6 +252,7 @@ async def _build_production(settings: RuntimeSettings) -> ApplicationServices:
             anon_key=settings.supabase_anon_key.get_secret_value(),
             service_role_key=settings.supabase_service_role_key.get_secret_value(),
             database=database,
+            email_redirect_url=settings.supabase_email_redirect_url,
         ),
         repository=repository,
         health=health,

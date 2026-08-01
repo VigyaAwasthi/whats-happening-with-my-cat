@@ -1,7 +1,30 @@
+# Secrets. Never commit a real environment file; `.env.example` is the template.
 .env
+.env.*
+!.env.example
+
+# Virtualenvs, caches, build output
 .pytest_cache/
+.mypy_cache/
 .venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .DS_Store
+node_modules/
+.next/
+dist/
+build/
+.wrangler/
+*.tsbuildinfo
+
+# Local run artifacts
+*.log
+
+# macOS/iCloud duplicate copies ("container 2.py"). These are stale forks of a
+# real source file: they shadow nothing at runtime but break the mypy gate and
+# get committed by accident. Delete them; never track them.
+* [0-9].py
+* [0-9].ts
+* [0-9].md
+* [0-9].tsbuildinfo

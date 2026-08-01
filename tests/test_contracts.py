@@ -18,6 +18,7 @@ from app.schemas.domain import (
 from app.schemas.enums import (
     AgeUnit,
     AppetiteChange,
+    BehaviorAnswerMode,
     BodySystem,
     ConfidenceLevel,
     EnergyLevel,
@@ -27,6 +28,7 @@ from app.schemas.enums import (
     WeightUnit,
 )
 from app.schemas.llm import (
+    BehaviorCitation,
     BehaviorInterpretation,
     Claim,
     GroundednessVerdict,
@@ -144,9 +146,19 @@ def test_all_structured_llm_outputs_round_trip_through_json() -> None:
         ),
         BehaviorInterpretation(
             interpretation="This may be play-seeking behavior.",
+            answer_mode=BehaviorAnswerMode.CORPUS_GROUNDED,
             confidence=ConfidenceLevel.VARIES_BY_CAT,
             reasoning="The behavior entry describes predatory play outlets.",
             cited_entry_ids=["play-needs"],
+            retrieved_entry_ids=["play-needs"],
+            cited_entries=[
+                BehaviorCitation(
+                    entry_id="play-needs",
+                    title="Play needs",
+                    organization="Example organization",
+                    url=None,
+                )
+            ],
             suggested_clarifying_questions=["When does this happen?"],
             medical_nudge=False,
         ),

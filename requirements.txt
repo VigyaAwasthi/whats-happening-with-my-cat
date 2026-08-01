@@ -1,0 +1,38 @@
+# Deployment lockfile — fully pinned, including transitive dependencies.
+#
+# `pyproject.toml` declares the direct dependencies and their intended ranges.
+# This file is the exact resolved set the deployment installs, so two deploys
+# of the same commit install byte-identical dependencies. Railway installs from
+# this file; it is the reason a rebuild cannot silently pick up a new Starlette.
+#
+# Regenerate after changing pyproject.toml:
+#   python -m venv /tmp/lock && /tmp/lock/bin/pip install -e . \
+#     && /tmp/lock/bin/pip freeze --exclude-editable > requirements.txt
+# then re-add this header, and re-run pytest and mypy against the new set.
+#
+# Deliberately excluded: the `local-reranker` extra (sentence-transformers,
+# torch, transformers). That path is the zero-cost development reranker and the
+# production startup check rejects it. Keeping it out of the deployment image
+# removes roughly a gigabyte of wheels the deployed service never imports.
+
+annotated-types==0.8.0
+anyio==4.14.2
+certifi==2026.7.22
+click==8.4.2
+fastapi==0.116.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.18
+psycopg==3.2.9
+psycopg-binary==3.2.9
+psycopg-pool==3.2.6
+pydantic==2.11.7
+pydantic-core==2.33.2
+pydantic-settings==2.10.1
+python-dotenv==1.2.2
+starlette==0.47.3
+tenacity==9.1.2
+typing-extensions==4.16.0
+typing-inspection==0.4.2
+uvicorn==0.35.0

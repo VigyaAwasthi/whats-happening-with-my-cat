@@ -1,0 +1,50 @@
+name: backend-contract-and-routing
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the scan can see every blob, not just the tip.
+          fetch-depth: 0
+      - name: Scan tracked files and history for credentials
+        run: ./scripts/scan_secrets.sh --history
+
+  routing-and-types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Must match .python-version, which is what Railway builds with.
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -e ".[test]"
+      - name: Run portable routing and evaluation regressions
+        run: python -B -m pytest -p no:cacheprovider tests/routing tests/test_evaluation.py
+      - name: Run deployment-hardening contracts
+        # Explicitly isolated from any ambient .env so the config guards are
+        # asserted against the values the test passes, not the runner's.
+        run: python -B -m pytest -p no:cacheprovider tests/test_deployment_readiness.py
+      - name: Type-check application contracts and control flow
+        run: mypy app --no-incremental
+
+  deployment-lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install exactly what production installs
+        run: python -m pip install --no-cache-dir -r requirements.txt
+      - name: Confirm the app imports under the locked dependency set
+        # Catches a lockfile that drifted from pyproject.toml before Railway
+        # discovers it mid-deploy.
+        run: RUNTIME_MODE=development python -c "import app.main; print('ok')"

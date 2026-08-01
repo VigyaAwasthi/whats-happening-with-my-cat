@@ -26,9 +26,6 @@ class Settings(BaseSettings):
     anthropic_fast_model: str = Field(
         min_length=1, description="Fast-tier Anthropic model identifier."
     )
-    anthropic_reasoning_model: str = Field(
-        min_length=1, description="Reasoning-tier Anthropic model identifier."
-    )
     embedding_model: str = Field(min_length=1, description="Embedding model identifier.")
     embedding_dimensions: PositiveInt = Field(
         default=1024, description="Vector dimension mirrored by migration 003."

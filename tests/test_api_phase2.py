@@ -5,14 +5,18 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.safety.red_flags import canned_response
 
 
-def cat_payload(cat_id: object, name: str = "Mochi") -> dict[str, object]:
+def cat_payload(
+    cat_id: object, name: str = "Mochi", sex: str = "unknown"
+) -> dict[str, object]:
     return {
         "cat_id": str(cat_id),
         "name": name,
         "age": {"value": 3, "unit": "years"},
         "breed": None,
+        "sex": sex,
         "weight": {"value": 9, "unit": "lb"},
         "energy_level": 3,
         "common_patterns": "Knocks pens off the desk.",
@@ -82,6 +86,41 @@ def test_first_cat_bootstrap_and_emergency_route(monkeypatch: object) -> None:
         )
         assert emergency.status_code == 200
         assert emergency.json()["result"]["severity"] == "emergency"
+
+
+def test_urinary_sex_framing_uses_the_authorized_cat_profile(
+    monkeypatch: object,
+) -> None:
+    monkeypatch.setenv("RUNTIME_MODE", "development")
+    cats = {sex: uuid4() for sex in ("male", "female", "unknown")}
+    base = canned_response("urinary_obstruction").text
+    with TestClient(app) as client:
+        for sex, cat_id in cats.items():
+            created = client.post(
+                "/cats", json=cat_payload(cat_id, f"QA {sex}", sex)
+            )
+            assert created.status_code == 201
+
+        messages = {}
+        for sex, cat_id in cats.items():
+            response = client.post(
+                "/chat/health",
+                headers={"X-Active-Cat-ID": str(cat_id)},
+                json={
+                    "cat_id": str(cat_id),
+                    "message": "straining to pee and nothing comes out",
+                    "intake": None,
+                    "session_id": str(uuid4()),
+                },
+            )
+            assert response.status_code == 200
+            assert response.json()["result"]["response_kind"] == "emergency_canned"
+            messages[sex] = response.json()["result"]["message"]
+
+    assert messages["male"].startswith(base)
+    assert "24 to 48 hours" in messages["male"]
+    assert messages["female"] == base
+    assert messages["unknown"] == base
 
 
 def test_cat_cap_fact_detail_and_full_account_delete(monkeypatch: object) -> None:
