@@ -142,42 +142,32 @@ class SupabaseAuthService:
             "email": request.email,
             "password": request.password.get_secret_value(),
         }
-        if self._email_redirect_url:
-            # Where Supabase lands the user after the confirmation link. Must be
-            # registered under Auth -> URL Configuration -> Redirect URLs, or
-            # Supabase silently substitutes the project's Site URL.
-            body["email_redirect_to"] = self._email_redirect_url
+        params = (
+            {"redirect_to": self._email_redirect_url}
+            if self._email_redirect_url
+            else None
+        )
         response = await self._client.post(
             "/auth/v1/signup",
             headers={"apikey": self._anon_key},
+            params=params,
             json=body,
         )
         _raise_for_auth_status(response)
         payload = response.json()
-        user = payload.get("user")
-        if not isinstance(user, dict) or user.get("id") is None:
-            raise ValueError("Supabase sign-up returned no user identity")
-        await self._database.execute(
-            """
-            INSERT INTO accounts (auth_subject_id, preferences)
-            VALUES (%s, %s::jsonb)
-            ON CONFLICT (auth_subject_id) DO NOTHING
-            """,
-            (
-                user["id"],
-                json.dumps(
-                    {
-                        "tone": "balanced",
-                        "notification_settings": {"settings": {}},
-                        "locale": "en-US",
-                    }
-                ),
-            ),
-        )
-        # With email confirmation enabled, Supabase creates the identity but
-        # issues no session. The internal account row above is written either
-        # way, so confirming the email is all that stands between the user and
-        # a working sign-in.
+
+        # Depending on the Supabase Auth response shape, the identity may be
+        # nested under `user` or returned directly at the top level. Repeated
+        # signup attempts may intentionally omit identity information.
+        nested_user = payload.get("user")
+        user = nested_user if isinstance(nested_user, Mapping) else payload
+        subject = user.get("id") if isinstance(user, Mapping) else None
+
+        if subject is not None:
+            await self._ensure_account(subject)
+
+        # No session material means the user must confirm their email. Missing
+        # identity information must not become an internal server error.
         return _auth_response(payload)
 
     async def sign_in(self, request: AuthSessionRequest) -> AuthSessionResponse:
@@ -204,13 +194,46 @@ class SupabaseAuthService:
         )
         if response.status_code != 200:
             return None
+
         subject = response.json().get("id")
         if subject is None:
             return None
+
         row = await self._database.fetch_one(
-            "SELECT id FROM accounts WHERE auth_subject_id = %s", (subject,)
+            "SELECT id FROM accounts WHERE auth_subject_id = %s",
+            (subject,),
         )
-        return None if row is None else row["id"]
+        if row is not None:
+            return UUID(str(row["id"]))
+
+        # A confirmation-required signup may omit the identity, preventing the
+        # account row from being created during signup. Provision it when the
+        # user first presents a valid confirmed Supabase session.
+        return await self._ensure_account(subject)
+
+    async def _ensure_account(self, auth_subject_id: str | UUID) -> UUID:
+        row = await self._database.fetch_one(
+            """
+            INSERT INTO accounts (auth_subject_id, preferences)
+            VALUES (%s, %s::jsonb)
+            ON CONFLICT (auth_subject_id) DO UPDATE
+            SET auth_subject_id = EXCLUDED.auth_subject_id
+            RETURNING id
+            """,
+            (
+                auth_subject_id,
+                json.dumps(
+                    {
+                        "tone": "balanced",
+                        "notification_settings": {"settings": {}},
+                        "locale": "en-US",
+                    }
+                ),
+            ),
+        )
+        if row is None or row.get("id") is None:
+            raise RuntimeError("failed to provision internal account")
+        return UUID(str(row["id"]))
 
     async def delete_identity(self, auth_subject_id: UUID) -> bool:
         response = await self._client.delete(
