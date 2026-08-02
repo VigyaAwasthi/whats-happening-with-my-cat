@@ -79,6 +79,7 @@ export function ChatCorner({
           id: crypto.randomUUID(),
           role: "assistant",
           text: response.result.interpretation,
+          generation_id: response.generation_id,
           result: response.result,
         },
       ]);
@@ -240,6 +241,7 @@ export function ChatCorner({
                           session_id: sessionId,
                           corner: "behavior",
                           thumb,
+                          generation_id: message.generation_id,
                         });
                       }}
                     />

@@ -211,6 +211,7 @@ export const catApi = {
       session_id: string;
       corner: Corner;
       thumb: "up" | "down";
+      generation_id: string;
       helpfulness_score?: number | null;
     },
   ) {

@@ -89,6 +89,7 @@ export type BehaviorCitation = {
 
 export type BehaviorChatResponse = {
   session_id: string;
+  generation_id: string;
   result: BehaviorInterpretation;
 };
 
@@ -143,6 +144,7 @@ export type TriageResult = {
 
 export type HealthChatResponse = {
   session_id: string;
+  generation_id: string;
   result: TriageResult;
 };
 
@@ -195,11 +197,13 @@ export type BehaviorMessage =
       id: string;
       role: "assistant";
       text: string;
+      generation_id: string;
       result: BehaviorInterpretation;
     };
 
 export type HealthExchange = {
   id: string;
   concern: string;
+  generation_id: string;
   result: TriageResult;
 };

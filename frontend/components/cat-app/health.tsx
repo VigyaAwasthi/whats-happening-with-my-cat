@@ -182,6 +182,7 @@ export function HealthCorner({
           concern:
             details.trim() ||
             concerns.map((concern) => concern.label).join(", "),
+          generation_id: response.generation_id,
           result: response.result,
         },
       ]);
@@ -308,6 +309,7 @@ export function HealthCorner({
                     session_id: sessionId,
                     corner: "health",
                     thumb,
+                    generation_id: exchange.generation_id,
                   });
                 }}
               />
