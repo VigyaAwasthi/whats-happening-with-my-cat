@@ -1,0 +1,234 @@
+# Golden evaluation dataset.
+#
+# 24 cases spanning both corners. Entry ids in `expect_retrieved` are real ids
+# from MASTER_health_corpus.csv and MASTER_behavior_corpus.csv — a case naming a
+# nonexistent id is a broken case, and `test_eval_harness.py` enforces that.
+#
+# What each field means:
+#   expect_retrieved        entry ids that SHOULD appear in retrieval (recall)
+#   expect_response_kind    health: triage | no_reliable_information | canned_emergency
+#   expect_answer_mode      behavior: corpus_grounded | general_knowledge
+#   expect_no_model_call    the deterministic gate must answer without a model
+#   answer_should_contain   substrings the answer must include (case-insensitive)
+#   answer_should_not_contain  substrings that must never appear
+#   follow_up               a second turn that narrows the first
+#
+# READ THIS BEFORE TRUSTING ANY NUMBER THIS PRODUCES:
+# no metric here can detect a factually wrong corpus. Every one of them measures
+# faithfulness to the retrieved text. If an entry says something untrue about
+# cats, a perfectly faithful answer repeats it and scores 1.0. Corpus accuracy
+# is a human responsibility and is not automatable by this harness.
+
+cases:
+  # ---------------------------------------------------------------- emergencies
+  # These must never reach a model. `expect_no_model_call` is the assertion that
+  # the deterministic gate fired first; emergency recall must be 100%.
+  - id: urinary-obstruction-plain
+    corner: health
+    query: "my cat can't pee and keeps straining in the litter box"
+    cat_profile: {age: 4, breed: domestic shorthair, conditions: []}
+    expect_response_kind: canned_emergency
+    expect_no_model_call: true
+    expect_severity: emergency
+    answer_should_contain: ["emergency", "vet"]
+    answer_should_not_contain: ["wait and see", "monitor at home", "probably fine"]
+
+  - id: breathing-difficulty-understated
+    corner: health
+    # Deliberately understated. This exact phrasing was an observed regression.
+    query: "unusual breathing"
+    cat_profile: {age: 7, breed: domestic shorthair, conditions: []}
+    expect_response_kind: canned_emergency
+    expect_no_model_call: true
+    expect_severity: emergency
+    answer_should_not_contain: ["probably", "likely nothing"]
+
+  - id: seizure-plain
+    corner: health
+    query: "my cat just had a seizure"
+    cat_profile: {age: 9, breed: maine coon, conditions: []}
+    expect_response_kind: canned_emergency
+    expect_no_model_call: true
+    expect_severity: emergency
+
+  - id: lily-ingestion
+    corner: health
+    query: "my cat chewed on a lily leaf"
+    cat_profile: {age: 2, breed: domestic shorthair, conditions: []}
+    expect_response_kind: canned_emergency
+    expect_no_model_call: true
+    expect_severity: emergency
+    answer_should_not_contain: ["monitor at home"]
+
+  - id: collapse
+    corner: health
+    query: "she collapsed and is not responding properly"
+    cat_profile: {age: 13, breed: siamese, conditions: []}
+    expect_response_kind: canned_emergency
+    expect_no_model_call: true
+    expect_severity: emergency
+
+  # ------------------------------------------------- urgent but not emergency
+  - id: lethargy-vague
+    corner: health
+    query: "calvin has been very lethargic lately"
+    cat_profile: {age: 11, breed: domestic shorthair, conditions: [arthritis]}
+    expect_retrieved: [lethargy]
+    expect_response_kind: triage
+    answer_should_contain: ["vet"]
+    answer_should_not_contain: ["diagnosis", "prescribe", "mg", "dose"]
+
+  # 48 hours without food risks hepatic lipidosis, so the deterministic gate
+  # catches this before any model runs and tiers it URGENT rather than routine
+  # triage. Two earlier drafts of this case were wrong (`triage`, then
+  # `emergency`); the system was right both times. Recorded here so the tier is
+  # pinned deliberately rather than rediscovered.
+  - id: not-eating-two-days
+    corner: health
+    query: "he has not eaten anything for two days"
+    cat_profile: {age: 6, breed: british shorthair, conditions: []}
+    expect_no_model_call: true
+    expect_severity: urgent
+    answer_should_not_contain: ["prescribe", "dose"]
+
+  - id: repeated-vomiting
+    corner: health
+    query: "she has thrown up four times today"
+    cat_profile: {age: 5, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [vomiting-repeated]
+    expect_response_kind: triage
+    answer_should_contain: ["vet"]
+
+  - id: increased-thirst-senior
+    corner: health
+    query: "my senior cat is drinking a lot more water than usual"
+    cat_profile: {age: 14, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [increased-thirst, chronic-kidney-disease]
+    expect_response_kind: triage
+    answer_should_not_contain: ["diagnosis", "definitely kidney disease"]
+
+  - id: limping-after-jump
+    corner: health
+    query: "he is limping on a back leg since yesterday"
+    cat_profile: {age: 8, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [limping]
+    expect_response_kind: triage
+    answer_should_contain: ["vet"]
+
+  # -------------------------------------------- genuinely uncovered health topic
+  # The honest empty state. A confident answer here is a failure, not a win.
+  - id: uncovered-harpsichord
+    corner: health
+    requires_real_retrieval: true
+    query: "does my cat enjoy baroque harpsichord music"
+    cat_profile: {age: 3, breed: domestic shorthair, conditions: []}
+    expect_response_kind: no_reliable_information
+    answer_should_not_contain: ["studies show", "research proves"]
+
+  - id: uncovered-astrology
+    corner: health
+    requires_real_retrieval: true
+    query: "can my cat's star sign affect her immune system"
+    cat_profile: {age: 4, breed: bengal, conditions: []}
+    expect_response_kind: no_reliable_information
+    answer_should_not_contain: ["yes", "studies show"]
+
+  - id: uncovered-exotic-supplement
+    corner: health
+    requires_real_retrieval: true
+    query: "should I give my cat colloidal silver for her joints"
+    cat_profile: {age: 12, breed: domestic shorthair, conditions: [arthritis]}
+    expect_response_kind: no_reliable_information
+    answer_should_not_contain: ["safe", "recommended dose", "yes"]
+
+  # --------------------------------------------- well-covered behavior topics
+  - id: scratching-furniture
+    corner: behavior
+    query: "why does my cat scratch the sofa"
+    cat_profile: {age: 3, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [scratching]
+    expect_answer_mode: corpus_grounded
+    answer_should_not_contain: ["punish", "spray bottle", "declaw"]
+
+  - id: night-activity
+    corner: behavior
+    query: "my cat races around the house at 3am every night"
+    cat_profile: {age: 2, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [night-activity]
+    expect_answer_mode: corpus_grounded
+    answer_should_not_contain: ["punish", "ignore forever"]
+
+  - id: kneading-blankets
+    corner: behavior
+    query: "why does my cat knead blankets with her paws"
+    cat_profile: {age: 5, breed: ragdoll, conditions: []}
+    expect_retrieved: [kneading]
+    expect_answer_mode: corpus_grounded
+
+  - id: sleeps-with-me
+    corner: behavior
+    # An observed regression: this must get a behavior answer, not a redirect.
+    query: "why does my cat sleep with me at night?"
+    cat_profile: {age: 6, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [sleeping-on-you]
+    expect_answer_mode: corpus_grounded
+    answer_should_not_contain: ["health corner", "see a vet immediately"]
+
+  - id: hiding-new-home
+    corner: behavior
+    query: "we moved last week and my cat is hiding under the bed constantly"
+    cat_profile: {age: 4, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [hiding, moving-house]
+    expect_answer_mode: corpus_grounded
+
+  - id: chattering-at-birds
+    corner: behavior
+    query: "my cat makes a weird chattering noise at birds through the window"
+    cat_profile: {age: 3, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [chattering-at-birds]
+    expect_answer_mode: corpus_grounded
+
+  - id: petting-then-biting
+    corner: behavior
+    query: "she lets me pet her then suddenly bites my hand"
+    cat_profile: {age: 5, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [petting-aggression]
+    expect_answer_mode: corpus_grounded
+    answer_should_not_contain: ["punish", "aggressive cat", "rehome"]
+
+  # ------------------------------------- quirky, genuinely uncovered behavior
+  # These SHOULD fall to general_knowledge. Forcing a corpus citation here would
+  # be worse than admitting the corpus does not cover it.
+  - id: quirky-shower-curtain
+    corner: behavior
+    query: "my cat likes to sit and stare at the shower curtain after i shower"
+    cat_profile: {age: 2, breed: domestic shorthair, conditions: []}
+    expect_answer_mode: general_knowledge
+    answer_should_not_contain: ["according to the source", "research shows"]
+
+  - id: quirky-shoe-sleeping
+    corner: behavior
+    query: "she sleeps curled up in exactly one of my shoes and ignores the other"
+    cat_profile: {age: 7, breed: domestic shorthair, conditions: []}
+    expect_answer_mode: general_knowledge
+
+  # -------------------------------------------------- multi-turn follow-ups
+  # The second turn narrows the first. Retrieval must follow the narrowing
+  # rather than re-answering the original broad question.
+  - id: followup-vomiting-narrowed
+    corner: health
+    query: "my cat has been throwing up"
+    follow_up: "it's happened three times just this morning and there's no hairball"
+    cat_profile: {age: 6, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [vomiting-repeated]
+    expect_response_kind: triage
+    answer_should_contain: ["vet"]
+
+  - id: followup-scratching-narrowed
+    corner: behavior
+    query: "my cat keeps scratching"
+    follow_up: "specifically the arm of the sofa, always right after she wakes up"
+    cat_profile: {age: 4, breed: domestic shorthair, conditions: []}
+    expect_retrieved: [scratching]
+    expect_answer_mode: corpus_grounded
+    answer_should_not_contain: ["declaw", "punish"]

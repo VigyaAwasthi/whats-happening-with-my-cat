@@ -20,7 +20,8 @@ from typing import Any
 
 
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # postgresql://user:secret@host -> keep shape, drop the password
+    # A database DSN carrying inline credentials: keep the shape, drop the
+    # password.  # pragma: allowlist-secret
     (re.compile(r"(?i)\b(postgres(?:ql)?://[^:/\s]+:)[^@\s]+(@)"), r"\1***\2"),
     # Provider key formats: Anthropic, Voyage, Cohere, Supabase publishable keys.
     (re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{8,}"), "sk-ant-***"),

@@ -22,11 +22,13 @@ from app.schemas.enums import (
     CatSex,
     Corner,
     EnergyLevel,
+    FeedbackReason,
     FeedbackThumb,
     MomentKind,
 )
 from app.schemas.llm import BehaviorInterpretation, SymptomIntake, TriageResult
 from app.schemas.memory import LongTermMemory, SessionMemory
+from app.schemas.trace import GenerationTrace
 
 
 class AuthSessionRequest(ContractModel):
@@ -186,6 +188,13 @@ class BehaviorChatResponse(ContractModel):
     result: BehaviorInterpretation = Field(
         description="Structured interpretation after code-controlled decisions."
     )
+    generation_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Server-issued identifier for this answer. Clients send it back with "
+            "feedback so a rating attaches to one generation and its trace."
+        ),
+    )
 
 
 class HealthChatRequest(ContractModel):
@@ -215,6 +224,13 @@ class HealthChatResponse(ContractModel):
         description="Effective session id, including a replacement after a scope switch."
     )
     result: TriageResult = Field(description="Validated grounded triage result.")
+    generation_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Server-issued identifier for this answer. Clients send it back with "
+            "feedback so a rating attaches to one generation and its trace."
+        ),
+    )
 
 
 class FunFactListRequest(ContractModel):
@@ -291,21 +307,52 @@ class MomentListResponse(ContractModel):
 
 
 class FeedbackRequest(ContractModel):
-    """Thumb and optional helpfulness score for a cat-scoped session."""
+    """A rating attached to one specific generated answer.
+
+    `generation_id` is what makes this actionable. Session-only feedback says a
+    conversation went badly; it cannot say which message, what was retrieved
+    for it, or which prompt produced it. With the generation id, the rating
+    joins directly to the trace that explains the answer.
+
+    It is optional rather than required only so that a client which has not yet
+    been updated still records something instead of erroring — but such a row is
+    marked untraceable and is excluded from reason analysis.
+    """
 
     cat_id: UUID = Field(description="Mandatory active-cat isolation key.")
     session_id: UUID = Field(description="Session receiving feedback.")
     corner: Corner = Field(description="Corner that produced the response.")
     thumb: FeedbackThumb = Field(description="Binary helpful or unhelpful choice.")
+    generation_id: UUID | None = Field(
+        default=None,
+        description="The specific answer being rated; joins to its generation trace.",
+    )
+    reason: FeedbackReason | None = Field(
+        default=None,
+        description="Structured reason, collected on negative feedback.",
+    )
+    reason_text: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Optional short free-text reason in the user's own words.",
+    )
     helpfulness_score: Annotated[
         int | None,
         Field(
-            default=None,
             ge=1,
             le=5,
             description="Optional one-to-five helpfulness score.",
         ),
-    ]
+    ] = None
+
+    @model_validator(mode="after")
+    def reason_belongs_to_negative_feedback(self) -> "FeedbackRequest":
+        """A reason explains a complaint; on a thumbs-up it is noise."""
+        if self.thumb is FeedbackThumb.UP and self.reason is not None:
+            raise ValueError("a structured reason applies only to negative feedback")
+        if self.reason_text is not None and not self.reason_text.strip():
+            raise ValueError("reason_text must be meaningful or omitted")
+        return self
 
 
 class FeedbackRecord(FeedbackRequest):
@@ -313,6 +360,22 @@ class FeedbackRecord(FeedbackRequest):
 
     id: UUID = Field(description="Feedback identifier.")
     created_at: AwareDatetime = Field(description="Timezone-aware creation time.")
+    updated_at: AwareDatetime | None = Field(
+        default=None,
+        description="Last edit time; feedback is editable and revocable.",
+    )
+
+    @property
+    def traceable(self) -> bool:
+        """Whether this rating can be joined to the answer that caused it."""
+        return self.generation_id is not None
+
+
+class FeedbackDeleteRequest(ContractModel):
+    """Withdraw one rating, scoped by cat so it cannot cross accounts."""
+
+    cat_id: UUID = Field(description="Mandatory active-cat isolation key.")
+    feedback_id: UUID = Field(description="Feedback record to withdraw.")
 
 
 class FeedbackResponse(ContractModel):
@@ -335,6 +398,14 @@ class AccountExportResponse(ContractModel):
     )
     moments: list[Moment] = Field(description="All scrapbook data, never AI context.")
     feedback: list[FeedbackRecord] = Field(description="All submitted feedback.")
+    generation_traces: list[GenerationTrace] = Field(
+        default_factory=list,
+        description=(
+            "Diagnostic record of every answer produced for this account's cats. "
+            "Included because it holds the user's own queries and the answers "
+            "served, which makes it their data under export and erasure."
+        ),
+    )
 
 
 class AccountDeleteResponse(ContractModel):

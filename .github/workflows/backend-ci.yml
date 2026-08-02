@@ -3,6 +3,10 @@ name: backend-contract-and-routing
 on:
   pull_request:
   push:
+  # The evaluation job below is the reason this runs broadly rather than on a
+  # path filter: prompts, retrieval, corpora, and orchestration all move these
+  # numbers, and a path filter that misses one lets a regression through
+  # unmeasured.
 
 jobs:
   secret-scan:
@@ -34,6 +38,46 @@ jobs:
         run: python -B -m pytest -p no:cacheprovider tests/test_deployment_readiness.py
       - name: Type-check application contracts and control flow
         run: mypy app --no-incremental
+
+  evaluation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -e ".[test]"
+
+      # The gate. Emergency recall must be 100%; a regression fails the build.
+      # Nothing else here can fail it — quality metrics move for legitimate
+      # reasons, and a gate that cries wolf is a gate people learn to ignore.
+      - name: Emergency recall and routing gate
+        env:
+          RUNTIME_MODE: development
+        run: python -B -m app.evaluation.harness --routing
+
+      - name: Golden dataset and quality metrics (advisory)
+        env:
+          RUNTIME_MODE: development
+        run: |
+          python -B -m app.evaluation.harness --record | tee eval-report.txt
+          echo '### Evaluation report' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat eval-report.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # Results are kept per run so trends are visible, rather than only ever
+      # seeing the latest number with nothing to compare it against.
+      - name: Upload evaluation history
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-history-${{ github.sha }}
+          path: |
+            eval-report.txt
+            tests/eval/history.jsonl
+          retention-days: 90
 
   deployment-lockfile:
     runs-on: ubuntu-latest

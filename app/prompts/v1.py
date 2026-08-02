@@ -1,5 +1,12 @@
 """Version 1 system prompts. Do not inline or mutate these at call sites."""
 
+# Recorded on every generation trace. Bump when a prompt's *content* changes so
+# that "was this answer produced by the old prompt?" is answerable from the
+# trace alone — which is the whole point of tracing a prompt version.
+BEHAVIOR_PROMPT_VERSION = "behavior-v1"
+HEALTH_PROMPT_VERSION = "health-v1"
+FAST_PROMPT_VERSION = "fast-v1"
+
 HEALTH_SYSTEM_PROMPT_V1 = """\
 You provide conservative cat-health triage information from trusted retrieved sources.
 You are never diagnosing. You explain only what the supplied sources support and guide

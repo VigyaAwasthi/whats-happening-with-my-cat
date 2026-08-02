@@ -1,6 +1,7 @@
 "use client";
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { prepareImageForUpload } from "@/lib/images";
 import type { AuthSession } from "@/lib/types";
 
 let client: SupabaseClient | null | undefined;
@@ -30,24 +31,69 @@ export async function uploadCatMedia(
   catId: string,
   file: File,
 ): Promise<{ key: string; previewUrl: string }> {
+  // Convert BEFORE anything else, including before the development-mode early
+  // return. Conversion is what proves the image can be rendered, so a file that
+  // fails here must never reach storage or a preview — that was the original
+  // bug, where an unrenderable HEIC uploaded "successfully".
+  const prepared = await prepareImageForUpload(file);
+
   const supabase = getSupabase();
   if (!supabase || !storageSessionReady) {
-    // OPEN QUESTION: the zero-cost backend returns development-only auth tokens,
-    // which cannot authorize Supabase Storage. Keep a local preview and persist
-    // no fake storage key; production auth uses the real upload path below.
-    return { key: "", previewUrl: URL.createObjectURL(file) };
+    // The zero-cost backend returns development-only auth tokens, which cannot
+    // authorize Supabase Storage. Keep a local preview and persist no fake
+    // storage key; production auth uses the real upload path below.
+    return { key: "", previewUrl: URL.createObjectURL(prepared.blob) };
   }
 
-  const safeName = file.name
+  const baseName = file.name
+    .replace(/\.[^.]+$/, "")
     .normalize("NFKD")
     .replace(/[^a-zA-Z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  const key = `${catId}/${crypto.randomUUID()}-${safeName || "memory"}`;
+  // The stored extension is the converted one. Keeping the original `.heic`
+  // here would make the object undisplayable again the moment anything served
+  // it by extension.
+  const key = `${catId}/${crypto.randomUUID()}-${baseName || "memory"}.${prepared.extension}`;
   const { error } = await supabase.storage
     .from("cat-media")
-    .upload(key, file, { cacheControl: "3600", upsert: false });
+    .upload(key, prepared.blob, {
+      cacheControl: "3600",
+      upsert: false,
+      contentType: prepared.blob.type,
+    });
   if (error) throw error;
-  return { key, previewUrl: URL.createObjectURL(file) };
+  return { key, previewUrl: URL.createObjectURL(prepared.blob) };
+}
+
+/**
+ * Upload a blob that `prepareImageForUpload` has already decoded and
+ * re-encoded. The editor converts at pick time so the preview proves the image
+ * renders, which means by save time there is nothing left to convert.
+ */
+export async function uploadPreparedCatMedia(
+  catId: string,
+  blob: Blob,
+  originalName: string,
+  extension: "webp" | "jpg",
+): Promise<{ key: string }> {
+  const supabase = getSupabase();
+  if (!supabase || !storageSessionReady) return { key: "" };
+
+  const baseName = originalName
+    .replace(/\.[^.]+$/, "")
+    .normalize("NFKD")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const key = `${catId}/${crypto.randomUUID()}-${baseName || "memory"}.${extension}`;
+  const { error } = await supabase.storage
+    .from("cat-media")
+    .upload(key, blob, {
+      cacheControl: "3600",
+      upsert: false,
+      contentType: blob.type,
+    });
+  if (error) throw error;
+  return { key };
 }
 
 export async function signedMediaUrl(key: string): Promise<string | null> {

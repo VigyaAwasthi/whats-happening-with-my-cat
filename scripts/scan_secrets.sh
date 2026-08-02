@@ -36,6 +36,22 @@ PATTERNS=(
 # explicitly and narrowly rather than by loosening the patterns above.
 PLACEHOLDERS='YOUR_[A-Z_]+|CHANGE_?ME|REPLACE_?ME|<[a-z_ -]+>|\*\*\*|xxxx|postgres:postgres@(127\.0\.0\.1|localhost)|:password@|example\.com'
 
+# Known-synthetic fixture values that already exist in committed history, from
+# the redaction tests. They are listed individually — not as a blanket
+# tests/ exclusion — so that a genuinely leaked credential in the same file
+# would still be caught. `--history` cannot be cleaned by editing the working
+# tree, and rewriting published history to remove a fake password is a worse
+# trade than naming it here.
+HISTORICAL_FIXTURES='postgresql://user:secret@host|hunter2|realpassword|AbCdEfGhIjKlMnOpQrStUv|abcdefghijklmnopqrstuvwxyz01|dozjgNryP4J3jVmNHl0w5N|postgresql://u:p@'
+
+# Synthetic credentials used as test fixtures — the redaction tests need real
+# credential SHAPES to assert against. A line is exempt only when it carries the
+# marker explicitly, so exempting something is a visible, reviewable act rather
+# than a whole directory quietly falling out of the scan.
+#
+#   "sk-ant-api03-notarealkey"  # pragma: allowlist-secret
+ALLOWLIST_MARKER='pragma: allowlist-secret'
+
 echo "Scanning $(git ls-files | wc -l | tr -d ' ') tracked files..."
 
 for pattern in "${PATTERNS[@]}"; do
@@ -44,7 +60,7 @@ for pattern in "${PATTERNS[@]}"; do
   hits=$(git grep -nIE "$pattern" -- \
         ':!scripts/scan_secrets.sh' \
         ':!package-lock.json' \
-        ':!*.lock' 2>/dev/null | grep -vE "$PLACEHOLDERS")
+        ':!*.lock' 2>/dev/null | grep -vE "$PLACEHOLDERS" | grep -vE "$HISTORICAL_FIXTURES" | grep -vF "$ALLOWLIST_MARKER")
   if [[ -n "$hits" ]]; then
     report "possible secret matching /$pattern/:"
     printf '%s\n' "$hits"
@@ -71,7 +87,7 @@ if [[ "${1:-}" == "--history" ]]; then
     hits=$(git rev-list --all \
              | xargs -I{} git grep -nIE "$pattern" {} -- \
                  ':!scripts/scan_secrets.sh' ':!package-lock.json' 2>/dev/null \
-             | grep -vE "$PLACEHOLDERS")
+             | grep -vE "$PLACEHOLDERS" | grep -vE "$HISTORICAL_FIXTURES" | grep -vF "$ALLOWLIST_MARKER")
     if [[ -n "$hits" ]]; then
       report "possible secret in git history matching /$pattern/:"
       printf '%s\n' "$hits" | head -20

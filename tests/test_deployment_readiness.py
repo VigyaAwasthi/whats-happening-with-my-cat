@@ -336,7 +336,7 @@ def test_production_rejects_an_unreviewed_model(
     monkeypatch.delenv("ANTHROPIC_BEHAVIOR_MODEL", raising=False)
     with pytest.raises(ValidationError, match="unreviewed Anthropic model"):
         RuntimeSettings(
-            database_url="postgresql://u:p@h/db",  # type: ignore[arg-type]
+            database_url="postgresql://u:p@h/db",  # type: ignore[arg-type]  # pragma: allowlist-secret
             supabase_url="https://example.supabase.co",
             supabase_anon_key="anon",  # type: ignore[arg-type]
             supabase_service_role_key="service",  # type: ignore[arg-type]
@@ -365,7 +365,7 @@ def test_production_rejects_an_unreviewed_model(
 def test_malformed_cors_origins_are_rejected(origin: str) -> None:
     with pytest.raises(ValidationError, match="CORS origin"):
         RuntimeSettings(
-            database_url="postgresql://u:p@h/db",  # type: ignore[arg-type]
+            database_url="postgresql://u:p@h/db",  # type: ignore[arg-type]  # pragma: allowlist-secret
             supabase_url="https://example.supabase.co",
             supabase_anon_key="anon",  # type: ignore[arg-type]
             supabase_service_role_key="service",  # type: ignore[arg-type]
@@ -381,7 +381,7 @@ def test_malformed_cors_origins_are_rejected(origin: str) -> None:
 def test_production_refuses_a_placeholder_secret() -> None:
     with pytest.raises(ValidationError, match="still placeholder"):
         RuntimeSettings(
-            database_url="postgresql://u:YOUR_DATABASE_PASSWORD@h/db",  # type: ignore[arg-type]
+            database_url="postgresql://u:YOUR_DATABASE_PASSWORD@h/db",  # type: ignore[arg-type]  # pragma: allowlist-secret
             supabase_url="https://example.supabase.co",
             supabase_anon_key="anon",  # type: ignore[arg-type]
             supabase_service_role_key="service",  # type: ignore[arg-type]
@@ -403,7 +403,7 @@ def test_production_refuses_the_development_reranker() -> None:
     # against whatever happens to be on the machine.
     with pytest.raises(ValidationError, match="RERANKER_MODE=local"):
         RuntimeSettings(
-            database_url="postgresql://u:realpassword@h/db",  # type: ignore[arg-type]
+            database_url="postgresql://u:realpassword@h/db",  # type: ignore[arg-type]  # pragma: allowlist-secret
             supabase_url="https://example.supabase.co",
             supabase_anon_key="anonkey",  # type: ignore[arg-type]
             supabase_service_role_key="servicekey",  # type: ignore[arg-type]
@@ -465,10 +465,10 @@ def test_pending_status_rejects_partial_session_material() -> None:
 @pytest.mark.parametrize(
     "secret",
     [
-        "postgresql://postgres:hunter2@db.abc.supabase.co:5432/postgres",
-        "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv",
-        "pa-abcdefghijklmnopqrstuvwxyz01",
-        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",
+        "postgresql://postgres:hunter2@db.abc.supabase.co:5432/postgres",  # pragma: allowlist-secret
+        "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv",  # pragma: allowlist-secret
+        "pa-abcdefghijklmnopqrstuvwxyz01",  # pragma: allowlist-secret
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N",  # pragma: allowlist-secret
         'Authorization: "Bearer supersecretvalue"',
     ],
 )

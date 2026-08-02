@@ -206,6 +206,13 @@ class RuntimeSettings(Settings):
         default=20,
         description="Per-account chat requests allowed per rolling minute; cost protection only.",
     )
+    trace_retention_days: PositiveInt = Field(
+        default=90,
+        description=(
+            "Days a generation trace is kept before pruning. Traces hold the "
+            "user's query and the answer served, so they are not kept forever."
+        ),
+    )
     supabase_email_redirect_url: str = Field(
         default="http://localhost:3000/auth/confirmed",
         min_length=1,

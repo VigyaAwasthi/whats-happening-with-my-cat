@@ -20,6 +20,11 @@ from app.llm.client import (
     TokenPricing,
 )
 from app.memory.repository import InMemoryMemoryRepository, PostgresMemoryRepository
+from app.observability.repository import (
+    InMemoryTraceRepository,
+    PostgresTraceRepository,
+    TraceRepository,
+)
 from app.memory.service import CatMemoryService, PostgresMemoryRetriever
 from app.orchestration.behavior import BehaviorOrchestrator
 from app.orchestration.health import HealthOrchestrator
@@ -63,6 +68,7 @@ class ApplicationServices:
     health: HealthOrchestrator
     behavior: BehaviorOrchestrator
     memory_repository: object
+    traces: TraceRepository | None = None
     database: PostgresDatabase | None = None
 
 
@@ -99,8 +105,9 @@ async def close_services() -> None:
 
 def _build_development(settings: RuntimeSettings) -> ApplicationServices:
     corpus_dir = resolve_corpus_dir(settings.corpus_source_dir)
+    traces = InMemoryTraceRepository()
     repository = InMemoryApplicationRepository(
-        development_account(DEVELOPMENT_ACCOUNT_ID)
+        development_account(DEVELOPMENT_ACCOUNT_ID), traces
     )
     repository.load_facts(corpus_dir / "MASTER_fun_facts.csv")
     memory_repository = InMemoryMemoryRepository()
@@ -129,6 +136,7 @@ def _build_development(settings: RuntimeSettings) -> ApplicationServices:
         memory_writer=memory_writer,
         red_flags=red_flags,
         groundedness=groundedness,
+        traces=traces,
     )
     behavior = BehaviorOrchestrator(
         llm=llm,
@@ -149,6 +157,7 @@ def _build_development(settings: RuntimeSettings) -> ApplicationServices:
         memory_writer=memory_writer,
         red_flags=red_flags,
         groundedness=groundedness,
+        traces=traces,
     )
     return ApplicationServices(
         settings=settings,
@@ -157,12 +166,14 @@ def _build_development(settings: RuntimeSettings) -> ApplicationServices:
         health=health,
         behavior=behavior,
         memory_repository=memory_repository,
+        traces=traces,
     )
 
 
 async def _build_production(settings: RuntimeSettings) -> ApplicationServices:
     database = PostgresDatabase(settings.database_url.get_secret_value())
     await database.open()
+    traces = PostgresTraceRepository(database)
     embedder = VoyageEmbeddingProvider(
         api_key=settings.voyage_api_key.get_secret_value(),
         model=settings.embedding_model,
@@ -219,6 +230,7 @@ async def _build_production(settings: RuntimeSettings) -> ApplicationServices:
         memory_writer=memory_writer,
         red_flags=red_flags,
         groundedness=groundedness,
+        traces=traces,
     )
     behavior = BehaviorOrchestrator(
         llm=llm,
@@ -243,8 +255,9 @@ async def _build_production(settings: RuntimeSettings) -> ApplicationServices:
         memory_writer=memory_writer,
         red_flags=red_flags,
         groundedness=groundedness,
+        traces=traces,
     )
-    repository = PostgresApplicationRepository(database)
+    repository = PostgresApplicationRepository(database, traces)
     return ApplicationServices(
         settings=settings,
         auth=SupabaseAuthService(
@@ -258,6 +271,7 @@ async def _build_production(settings: RuntimeSettings) -> ApplicationServices:
         health=health,
         behavior=behavior,
         memory_repository=memory_repository,
+        traces=traces,
         database=database,
     )
 

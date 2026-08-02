@@ -35,6 +35,24 @@ class CatSex(str, Enum):
     UNKNOWN = "unknown"
 
 
+class FeedbackReason(str, Enum):
+    """Why a response was unhelpful.
+
+    These are not cosmetic categories: each points at a different fix, which is
+    the entire reason for asking. `WRONG_INFORMATION` and `DID_NOT_ANSWER`
+    indicate retrieval or corpus problems — the wrong entries were surfaced, or
+    none covered the question. `NOT_SPECIFIC_TO_MY_CAT` and `TOO_CAUTIOUS`
+    indicate the retrieval was fine and the prompt is at fault. Reading the
+    reason alongside the generation trace tells you which without guessing.
+    """
+
+    WRONG_INFORMATION = "wrong_information"
+    NOT_SPECIFIC_TO_MY_CAT = "not_specific_to_my_cat"
+    DID_NOT_ANSWER = "did_not_answer"
+    TOO_CAUTIOUS = "too_cautious"
+    OTHER = "other"
+
+
 class AuthStatus(str, Enum):
     """Whether an auth attempt produced a usable session."""
 

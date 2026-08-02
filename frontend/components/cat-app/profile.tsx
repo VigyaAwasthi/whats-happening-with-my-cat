@@ -5,9 +5,9 @@ import {
   ArrowRight,
   Camera,
   Download,
+  Pencil,
   Plus,
   Trash2,
-  Upload,
 } from "lucide-react";
 import {
   useEffect,
@@ -17,21 +17,26 @@ import {
   type FormEvent,
 } from "react";
 import { catApi } from "@/lib/api";
-import { uploadCatMedia } from "@/lib/supabase";
-import type {
-  BrandAccent,
-  CatCreateInput,
-  CatProfile,
-  CatSex,
-} from "@/lib/types";
+import { ImageConversionError, prepareImageForUpload } from "@/lib/images";
+import { uploadPreparedCatMedia } from "@/lib/supabase";
+import type { CatProfile } from "@/lib/types";
 import { EmptyPhoto, useSignedUrls } from "@/components/cat-app/shared";
+import { CatEditor } from "@/components/cat-app/cat-editor";
+import {
+  CatFormFields,
+  PhotoPicker,
+  emptyCatForm,
+  formToCreateInput,
+  type CatFormValues,
+} from "@/components/cat-app/cat-form";
 
-const ACCENTS: { value: BrandAccent; name: string }[] = [
-  { value: "#E43D12", name: "Vermillion" },
-  { value: "#D6536D", name: "Raspberry" },
-  { value: "#EFB11D", name: "Golden" },
-  { value: "#FFA2B6", name: "Blush" },
-];
+type PreparedPhoto = {
+  id: string;
+  blob: Blob;
+  extension: "webp" | "jpg";
+  name: string;
+  previewUrl: string;
+};
 
 type ProfileManagerProps = {
   token: string;
@@ -48,53 +53,83 @@ export function ProfileManager({
   onEnterHub,
   onSignOut,
 }: ProfileManagerProps) {
-  const [name, setName] = useState("");
-  const [ageValue, setAgeValue] = useState("3");
-  const [ageUnit, setAgeUnit] = useState<"months" | "years">("years");
-  const [breed, setBreed] = useState("");
-  const [sex, setSex] = useState<CatSex>("unknown");
-  const [weightValue, setWeightValue] = useState("9");
-  const [weightUnit, setWeightUnit] = useState<"kg" | "lb">("lb");
-  const [energy, setEnergy] = useState<1 | 2 | 3 | 4 | 5>(3);
-  const [patterns, setPatterns] = useState("");
-  const [conditions, setConditions] = useState("");
-  const [accent, setAccent] = useState<BrandAccent>("#E43D12");
-  const [photos, setPhotos] = useState<File[]>([]);
+  const [values, setValues] = useState<CatFormValues>(emptyCatForm);
+  const [photos, setPhotos] = useState<PreparedPhoto[]>([]);
   const [intent, setIntent] = useState<"another" | "hub">("hub");
   const [busy, setBusy] = useState(false);
+  const [preparing, setPreparing] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
-  const [updatingSex, setUpdatingSex] = useState<string | null>(null);
+  const [editingCatId, setEditingCatId] = useState<string | null>(null);
   const [confirmAccountDelete, setConfirmAccountDelete] = useState(false);
-  const photoPreviews = useMemo(
-    () => photos.map((photo) => URL.createObjectURL(photo)),
-    [photos],
+
+  const editingCat = useMemo(
+    () => cats.find((cat) => cat.id === editingCatId) ?? null,
+    [cats, editingCatId],
   );
 
   useEffect(
-    () => () => photoPreviews.forEach((url) => URL.revokeObjectURL(url)),
-    [photoPreviews],
+    () => () => photos.forEach((photo) => URL.revokeObjectURL(photo.previewUrl)),
+    [photos],
   );
 
-  function resetForm() {
-    setName("");
-    setAgeValue("3");
-    setAgeUnit("years");
-    setBreed("");
-    setSex("unknown");
-    setWeightValue("9");
-    setWeightUnit("lb");
-    setEnergy(3);
-    setPatterns("");
-    setConditions("");
-    setAccent("#E43D12");
-    setPhotos([]);
+  function update(patch: Partial<CatFormValues>) {
+    setValues((current) => ({ ...current, ...patch }));
   }
 
-  function pickPhotos(event: ChangeEvent<HTMLInputElement>) {
+  function resetForm() {
+    setValues(emptyCatForm());
+    setPhotos((current) => {
+      current.forEach((photo) => URL.revokeObjectURL(photo.previewUrl));
+      return [];
+    });
+  }
+
+  /**
+   * Convert on pick so an unreadable photo fails here, in front of the file
+   * picker, instead of after the cat is saved. The preview shown below is the
+   * converted blob, which makes the thumbnail itself the proof that the stored
+   * image will render.
+   */
+  async function pickPhotos(event: ChangeEvent<HTMLInputElement>) {
     const selected = Array.from(event.target.files ?? []);
-    setPhotos((current) => [...current, ...selected].slice(0, 6));
+    event.target.value = "";
+    if (!selected.length) return;
+    setPreparing(true);
+    setError("");
+    const room = Math.max(0, 6 - photos.length);
+    const failures: string[] = [];
+    const prepared: PreparedPhoto[] = [];
+    for (const file of selected.slice(0, room)) {
+      try {
+        const result = await prepareImageForUpload(file);
+        prepared.push({
+          id: crypto.randomUUID(),
+          blob: result.blob,
+          extension: result.extension,
+          name: file.name,
+          previewUrl: URL.createObjectURL(result.blob),
+        });
+      } catch (caught) {
+        failures.push(
+          caught instanceof ImageConversionError
+            ? `${file.name}: ${caught.message}`
+            : `${file.name} could not be read.`,
+        );
+      }
+    }
+    setPhotos((current) => [...current, ...prepared]);
+    if (failures.length) setError(failures.join(" "));
+    setPreparing(false);
+  }
+
+  function removePhoto(id: string) {
+    setPhotos((current) => {
+      const target = current.find((photo) => photo.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return current.filter((photo) => photo.id !== id);
+    });
   }
 
   async function submit(event: FormEvent) {
@@ -107,34 +142,21 @@ export function ProfileManager({
     setError("");
     setNotice("");
     const catId = crypto.randomUUID();
-    const input: CatCreateInput = {
-      cat_id: catId,
-      name: name.trim(),
-      age: { value: Number(ageValue), unit: ageUnit },
-      breed: breed.trim() || null,
-      sex,
-      weight: { value: Number(weightValue), unit: weightUnit },
-      energy_level: energy,
-      common_patterns: patterns.trim(),
-      known_conditions: conditions
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean),
-      photo_references: [],
-      theme: { primary_color: accent, accent_color: accent },
-    };
 
     try {
-      await catApi.createCat(token, input);
-      const uploaded = await Promise.all(
-        photos.map((photo) => uploadCatMedia(catId, photo)),
-      );
-      const keys = uploaded.map((item) => item.key).filter(Boolean);
+      await catApi.createCat(token, formToCreateInput(values, catId, []));
+      const keys: string[] = [];
+      for (const photo of photos) {
+        const { key } = await uploadPreparedCatMedia(
+          catId,
+          photo.blob,
+          photo.name,
+          photo.extension,
+        );
+        if (key) keys.push(key);
+      }
       if (keys.length) {
-        await catApi.patchCat(token, {
-          cat_id: catId,
-          photo_references: keys,
-        });
+        await catApi.patchCat(token, { cat_id: catId, photo_references: keys });
       } else if (photos.length) {
         setNotice(
           "Your cat is saved. Photo previews stay on this device until real Supabase auth is enabled.",
@@ -166,25 +188,6 @@ export function ProfileManager({
       setError(
         caught instanceof Error ? caught.message : "We could not remove this cat.",
       );
-    }
-  }
-
-  async function updateSex(cat: CatProfile, nextSex: CatSex) {
-    setUpdatingSex(cat.id);
-    setError("");
-    setNotice("");
-    try {
-      await catApi.patchCat(token, { cat_id: cat.id, sex: nextSex });
-      await onCatsChanged(cat.id);
-      setNotice(`${cat.name}'s profile is updated.`);
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : `We could not update ${cat.name}'s profile.`,
-      );
-    } finally {
-      setUpdatingSex(null);
     }
   }
 
@@ -255,137 +258,7 @@ export function ProfileManager({
 
       <div className="profile-layout">
         <form className="cat-form" onSubmit={submit}>
-          <div className="form-section-heading">
-            <span>01</span>
-            <div>
-              <h2>The essentials</h2>
-              <p>The things you know without thinking.</p>
-            </div>
-          </div>
-          <div className="form-grid">
-            <label className="field-wide">
-              Name
-              <input
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                required
-                maxLength={100}
-                placeholder="Mochi"
-              />
-            </label>
-            <label>
-              Age
-              <span className="joined-fields">
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={ageValue}
-                  onChange={(event) => setAgeValue(event.target.value)}
-                  required
-                  aria-label="Age value"
-                />
-                <select
-                  value={ageUnit}
-                  onChange={(event) =>
-                    setAgeUnit(event.target.value as "months" | "years")
-                  }
-                  aria-label="Age unit"
-                >
-                  <option value="months">months</option>
-                  <option value="years">years</option>
-                </select>
-              </span>
-            </label>
-            <label>
-              Weight
-              <span className="joined-fields">
-                <input
-                  type="number"
-                  min="0.1"
-                  step="0.1"
-                  value={weightValue}
-                  onChange={(event) => setWeightValue(event.target.value)}
-                  required
-                  aria-label="Weight value"
-                />
-                <select
-                  value={weightUnit}
-                  onChange={(event) =>
-                    setWeightUnit(event.target.value as "kg" | "lb")
-                  }
-                  aria-label="Weight unit"
-                >
-                  <option value="lb">lb</option>
-                  <option value="kg">kg</option>
-                </select>
-              </span>
-            </label>
-            <label className="field-wide">
-              Breed <span className="optional">optional</span>
-              <input
-                value={breed}
-                onChange={(event) => setBreed(event.target.value)}
-                placeholder="Domestic shorthair, Bengal, a glorious mystery…"
-              />
-            </label>
-            <label className="field-wide">
-              Sex <span className="optional">optional</span>
-              <select
-                value={sex}
-                onChange={(event) => setSex(event.target.value as CatSex)}
-              >
-                <option value="unknown">Not sure</option>
-                <option value="female">Female</option>
-                <option value="male">Male</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="form-section-heading">
-            <span>02</span>
-            <div>
-              <h2>Their particular ways</h2>
-              <p>There is no wrong kind of cat here.</p>
-            </div>
-          </div>
-          <fieldset className="energy-field">
-            <legend>Energy level</legend>
-            <div>
-              {[1, 2, 3, 4, 5].map((level) => (
-                <button
-                  type="button"
-                  key={level}
-                  className={energy === level ? "active" : ""}
-                  aria-pressed={energy === level}
-                  onClick={() => setEnergy(level as 1 | 2 | 3 | 4 | 5)}
-                >
-                  {level}
-                </button>
-              ))}
-            </div>
-            <span>
-              <small>quiet observer</small>
-              <small>tiny weather system</small>
-            </span>
-          </fieldset>
-          <label>
-            Common patterns
-            <textarea
-              value={patterns}
-              onChange={(event) => setPatterns(event.target.value)}
-              rows={4}
-              placeholder="Knocks pens off the desk. Sleeps under the radiator. Sprints after dinner."
-            />
-          </label>
-          <label>
-            Known conditions <span className="optional">comma-separated</span>
-            <input
-              value={conditions}
-              onChange={(event) => setConditions(event.target.value)}
-              placeholder="Asthma, food allergy"
-            />
-          </label>
+          <CatFormFields values={values} onChange={update} idPrefix="new" />
 
           <div className="form-section-heading">
             <span>03</span>
@@ -394,47 +267,24 @@ export function ProfileManager({
               <p>Up to six photos. You can always add more later.</p>
             </div>
           </div>
-          <label className="photo-drop">
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={pickPhotos}
-              className="sr-only"
-            />
-            <Upload size={22} aria-hidden="true" />
-            <span>Choose photos</span>
-            <small>JPG, PNG, HEIC or WebP</small>
-          </label>
-          {photoPreviews.length ? (
+          <PhotoPicker onPick={pickPhotos} busy={preparing} />
+          {photos.length ? (
             <div className="photo-preview-row">
-              {photoPreviews.map((url, index) => (
-                <div key={url}>
+              {photos.map((photo, index) => (
+                <div key={photo.id}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={url} alt={`Selected cat photo ${index + 1}`} />
+                  <img src={photo.previewUrl} alt={`Selected cat photo ${index + 1}`} />
+                  <button
+                    type="button"
+                    onClick={() => removePhoto(photo.id)}
+                    aria-label={`Remove ${photo.name}`}
+                  >
+                    <Trash2 size={14} aria-hidden="true" />
+                  </button>
                 </div>
               ))}
             </div>
           ) : null}
-
-          <fieldset className="accent-field">
-            <legend>Room accent</legend>
-            <p>The cream wall stays calm. This is their little signature.</p>
-            <div>
-              {ACCENTS.map((option) => (
-                <button
-                  type="button"
-                  key={option.value}
-                  className={accent === option.value ? "active" : ""}
-                  aria-pressed={accent === option.value}
-                  onClick={() => setAccent(option.value)}
-                >
-                  <span style={{ backgroundColor: option.value }} />
-                  {option.name}
-                </button>
-              ))}
-            </div>
-          </fieldset>
 
           {error ? (
             <p className="form-error" role="alert">
@@ -446,16 +296,16 @@ export function ProfileManager({
             <button
               className="secondary-button"
               type="submit"
-              disabled={busy || cats.length >= 10}
+              disabled={busy || preparing || cats.length >= 10}
               onClick={() => setIntent("another")}
             >
               <Plus size={17} aria-hidden="true" />
-              Save & add another
+              Save &amp; add another
             </button>
             <button
               className="primary-button"
               type="submit"
-              disabled={busy || cats.length >= 10}
+              disabled={busy || preparing || cats.length >= 10}
               onClick={() => setIntent("hub")}
             >
               {busy ? "Making their room…" : "Save & enter the wall"}
@@ -476,11 +326,10 @@ export function ProfileManager({
                   key={cat.id}
                   cat={cat}
                   pending={pendingDelete === cat.id}
-                  updatingSex={updatingSex === cat.id}
                   onRequestDelete={() => setPendingDelete(cat.id)}
                   onCancelDelete={() => setPendingDelete(null)}
                   onDelete={() => removeCat(cat.id)}
-                  onSexChange={(nextSex) => updateSex(cat, nextSex)}
+                  onEdit={() => setEditingCatId(cat.id)}
                 />
               ))}
             </div>
@@ -539,6 +388,16 @@ export function ProfileManager({
           </div>
         </aside>
       </div>
+
+      {editingCat ? (
+        <CatEditor
+          key={editingCat.id}
+          token={token}
+          cat={editingCat}
+          onSaved={onCatsChanged}
+          onClose={() => setEditingCatId(null)}
+        />
+      ) : null}
     </main>
   );
 }
@@ -546,19 +405,17 @@ export function ProfileManager({
 function HouseholdCat({
   cat,
   pending,
-  updatingSex,
   onRequestDelete,
   onCancelDelete,
   onDelete,
-  onSexChange,
+  onEdit,
 }: {
   cat: CatProfile;
   pending: boolean;
-  updatingSex: boolean;
   onRequestDelete: () => void;
   onCancelDelete: () => void;
   onDelete: () => void;
-  onSexChange: (sex: CatSex) => void;
+  onEdit: () => void;
 }) {
   const urls = useSignedUrls(cat.photo_references.slice(0, 1));
   const photo = cat.photo_references[0]
@@ -578,19 +435,10 @@ function HouseholdCat({
           {cat.age.value} {cat.age.unit}
           {cat.breed ? ` · ${cat.breed}` : ""}
         </span>
-        <label className="household-sex">
-          <span>Sex</span>
-          <select
-            value={cat.sex ?? "unknown"}
-            disabled={updatingSex}
-            onChange={(event) => onSexChange(event.target.value as CatSex)}
-            aria-label={`Sex for ${cat.name}`}
-          >
-            <option value="unknown">Not sure</option>
-            <option value="female">Female</option>
-            <option value="male">Male</option>
-          </select>
-        </label>
+        <span className="household-meta">
+          {cat.photo_references.length} photo
+          {cat.photo_references.length === 1 ? "" : "s"}
+        </span>
       </div>
       {pending ? (
         <div className="cat-delete-actions">
@@ -602,14 +450,16 @@ function HouseholdCat({
           </button>
         </div>
       ) : (
-        <button
-          type="button"
-          className="icon-button"
-          onClick={onRequestDelete}
-        >
-          <Trash2 size={16} aria-hidden="true" />
-          <span className="sr-only">Remove {cat.name}</span>
-        </button>
+        <div className="household-cat-actions">
+          <button type="button" className="icon-button" onClick={onEdit}>
+            <Pencil size={16} aria-hidden="true" />
+            <span className="sr-only">Edit {cat.name}</span>
+          </button>
+          <button type="button" className="icon-button" onClick={onRequestDelete}>
+            <Trash2 size={16} aria-hidden="true" />
+            <span className="sr-only">Remove {cat.name}</span>
+          </button>
+        </div>
       )}
     </article>
   );

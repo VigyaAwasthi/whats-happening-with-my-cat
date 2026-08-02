@@ -27,6 +27,10 @@ test = [
     "mypy==1.14.1",
     "pytest==8.4.1",
     "pytest-asyncio==1.1.0",
+    # Used only by the evaluation harness, which never runs in the deployed
+    # service. Deliberately absent from requirements.txt for that reason.
+    "PyYAML==6.0.3",
+    "types-PyYAML==6.0.12.20250915",
 ]
 
 [tool.setuptools.packages.find]

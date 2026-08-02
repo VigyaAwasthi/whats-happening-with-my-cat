@@ -385,6 +385,10 @@ class SpendTracker:
         """Read the authoritative value for the current window from the ledger."""
         return await self._ledger.total(self.budget_key)
 
+    def pricing_for(self, model: str) -> TokenPricing | None:
+        """Rates for a model, or None. Used by tracing, which must not raise."""
+        return self._pricing.get(model)
+
     def _model_pricing(self, model: str) -> TokenPricing:
         try:
             return self._pricing[model]
@@ -504,6 +508,7 @@ class AnthropicStructuredClient:
                     usage,
                     validation_outcome,
                     attempt,
+                    self._spend.pricing_for(model),
                 )
                 return StructuredCallResult(value=value, attempts=attempt)
             except (
@@ -520,6 +525,7 @@ class AnthropicStructuredClient:
                     response.get("usage", {}),
                     validation_outcome,
                     attempt,
+                    self._spend.pricing_for(model),
                 )
 
         await _reconcile_spend_safely(
@@ -559,8 +565,21 @@ class DevelopmentStructuredClient:
         max_tokens: int = 1024,
     ) -> StructuredCallResult[T]:
         self.calls.append((purpose, output_type))
+        started = time.perf_counter()
         await asyncio.sleep(0)
         value = _development_value(output_type, user_prompt, cache_context)
+        # Recorded so trace shape, model-call counts, and the "no model call"
+        # safety assertions are exercised by the zero-cost development path too.
+        _record_call_on_trace(
+            model,
+            purpose,
+            (time.perf_counter() - started) * 1000,
+            {},
+            "passed" if value is not None else "failed",
+            1,
+            None,
+            "development",
+        )
         if value is None:
             return StructuredCallResult(
                 error=ToolError(
@@ -639,7 +658,13 @@ def _log_call(
     usage: dict[str, Any],
     validation: str,
     attempt: int,
+    pricing: TokenPricing | None = None,
+    prompt_version: str = "v1",
 ) -> None:
+    latency_ms = (time.perf_counter() - started) * 1000
+    _record_call_on_trace(
+        model, purpose, latency_ms, usage, validation, attempt, pricing, prompt_version
+    )
     logger.info(
         "llm_call model=%s purpose=%s latency_ms=%.1f input_tokens=%s "
         "output_tokens=%s cache_read=%s cache_creation=%s validation=%s attempt=%s",
@@ -653,6 +678,61 @@ def _log_call(
         validation,
         attempt,
     )
+
+
+def _record_call_on_trace(
+    model: str,
+    purpose: ModelPurpose,
+    latency_ms: float,
+    usage: dict[str, Any],
+    validation: str,
+    attempt: int,
+    pricing: TokenPricing | None,
+    prompt_version: str,
+) -> None:
+    """Attach this call to the in-flight generation trace, if there is one.
+
+    Tracing is observational: a fault here must never disturb the answer, so
+    every failure is swallowed. Imported lazily to keep the model client free of
+    an import-time dependency on the observability package.
+    """
+    try:
+        from app.observability.collector import current_trace
+        from app.schemas.trace import ModelCallTrace
+
+        collector = current_trace()
+        if collector is None:
+            return
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens", 0) or 0)
+        cost = Decimal("0")
+        if pricing is not None:
+            million = Decimal(1_000_000)
+            cost = (
+                Decimal(input_tokens) * pricing.input_per_million_usd
+                + Decimal(output_tokens) * pricing.output_per_million_usd
+                + Decimal(cache_read) * pricing.cache_read_per_million_usd
+                + Decimal(cache_write) * pricing.cache_write_per_million_usd
+            ) / million
+        collector.record_model_call(
+            ModelCallTrace(
+                purpose=purpose.value,
+                model=model,
+                prompt_version=prompt_version,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read,
+                cache_write_tokens=cache_write,
+                latency_ms=max(0.0, latency_ms),
+                validation=validation,
+                attempts=attempt,
+                cost_usd=float(cost),
+            )
+        )
+    except Exception:  # pragma: no cover - observability must not break requests
+        logger.debug("generation trace: model call not recorded", exc_info=True)
 
 
 def _development_value(

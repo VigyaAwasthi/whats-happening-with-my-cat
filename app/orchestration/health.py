@@ -4,15 +4,32 @@ import asyncio
 import logging
 import re
 from collections.abc import Sequence
+from contextlib import nullcontext
+from uuid import UUID
 
 from app.llm.client import ModelPurpose, StructuredLLMClient
 from app.memory.service import CatMemoryService
+from app.observability.collector import TraceCollector, current_trace, trace_scope
+from app.observability.recording import (
+    record_consensus,
+    record_final_context,
+    record_retrieval_stages,
+)
+from app.observability.repository import (
+    InMemoryTraceRepository,
+    TraceRepository,
+    write_trace_safely,
+)
 from app.orchestration.common import (
     VET_REFERRAL_LINE,
     no_reliable_information,
     record_health_safely,
 )
-from app.prompts.v1 import HEALTH_SYSTEM_PROMPT_V1, SYMPTOM_INTAKE_SYSTEM_PROMPT_V1
+from app.prompts.v1 import (
+    HEALTH_PROMPT_VERSION,
+    HEALTH_SYSTEM_PROMPT_V1,
+    SYMPTOM_INTAKE_SYSTEM_PROMPT_V1,
+)
 from app.safety.groundedness import CompositeGroundednessValidator
 from app.safety.red_flags import (
     DeterministicRedFlagChecker,
@@ -23,6 +40,7 @@ from app.schemas.api import HealthChatRequest, HealthChatResponse
 from app.schemas.corpora import HealthEntry
 from app.schemas.enums import CatSex, Corner, TriageResponseKind, UrgencyTier
 from app.schemas.llm import Claim, SymptomIntake, TriageResult
+from app.schemas.trace import GroundednessOutcome
 from app.url_safety import safe_source_url
 from app.tools.contracts import (
     GroundingEvidence,
@@ -50,8 +68,10 @@ class HealthOrchestrator:
         memory_writer: CatMemoryService,
         red_flags: DeterministicRedFlagChecker,
         groundedness: CompositeGroundednessValidator,
+        traces: TraceRepository | None = None,
     ) -> None:
         self._llm = llm
+        self._traces = traces or InMemoryTraceRepository()
         self._fast_model = fast_model
         self._health_model = health_model
         self._vet = vet_retriever
@@ -64,15 +84,36 @@ class HealthOrchestrator:
         self, request: HealthChatRequest, cat_sex: CatSex = CatSex.UNKNOWN
     ) -> HealthChatResponse:
         """Execute the strict flow and contain every operational exception."""
-        try:
-            return await self._handle(request, cat_sex)
-        except Exception:
-            logger.exception("health orchestration failed closed")
-            fallback = no_reliable_information()
-            session_id = await record_health_safely(
-                self._memory_writer, request, fallback.message
+        collector = TraceCollector(
+            cat_id=request.cat_id,
+            session_id=request.session_id,
+            corner=Corner.HEALTH,
+            query=request.message or "",
+        )
+        with trace_scope(collector):
+            try:
+                response = await self._handle(request, cat_sex)
+            except Exception:
+                logger.exception("health orchestration failed closed")
+                fallback = no_reliable_information()
+                session_id = await record_health_safely(
+                    self._memory_writer, request, fallback.message
+                )
+                response = HealthChatResponse(
+                    session_id=session_id,
+                    result=fallback,
+                    generation_id=collector.generation_id,
+                )
+            collector.set_outcome(
+                response_kind=response.result.response_kind.value,
+                response_text=response.result.message,
+                prompt_version=HEALTH_PROMPT_VERSION,
             )
-            return HealthChatResponse(session_id=session_id, result=fallback)
+            # Observational, and after the answer exists. `write_trace_safely`
+            # cannot raise, whatever repository is installed, so no trace fault
+            # can fail a user request.
+            await write_trace_safely(self._traces, collector.build())
+            return response
 
     async def _handle(
         self, request: HealthChatRequest, cat_sex: CatSex
@@ -82,6 +123,7 @@ class HealthOrchestrator:
         # Gate 1: deterministic raw keyword screen runs before any LLM call.
         raw_result = self._red_flags.check_raw(raw_text)
         if raw_result.matched_rules:
+            _record_red_flag(raw_result)
             return await self._canned(request, raw_result.canned_response_id, cat_sex)
 
         # A caller-supplied structured intake is also checked before any LLM call.
@@ -89,6 +131,7 @@ class HealthOrchestrator:
             intake = request.intake
             structured_result = self._red_flags.check_intake(intake)
             if structured_result.matched_rules:
+                _record_red_flag(structured_result)
                 return await self._canned(
                     request, structured_result.canned_response_id, cat_sex
                 )
@@ -107,14 +150,24 @@ class HealthOrchestrator:
                 session_id = await record_health_safely(
                     self._memory_writer, request, fallback.message
                 )
-                return HealthChatResponse(session_id=session_id, result=fallback)
+                return HealthChatResponse(
+                session_id=session_id,
+                result=fallback,
+                generation_id=_generation_id(),
+            )
             intake = extracted.value
             combined = self._red_flags.check_both(raw_text, intake)
             if combined.matched_rules:
+                _record_red_flag(combined)
                 return await self._canned(request, combined.canned_response_id, cat_sex)
 
         query = raw_text or intake.model_dump_json()
-        vet_output, memory_output, session_context = await asyncio.gather(
+        collector = current_trace()
+        retrieval_timer = (
+            collector.stage_timer("retrieval") if collector else nullcontext()
+        )
+        with retrieval_timer:
+            vet_output, memory_output, session_context = await asyncio.gather(
             self._vet.retrieve(
                 VetKnowledgeRetrieverInput(
                     query=query,
@@ -124,16 +177,23 @@ class HealthOrchestrator:
             self._memory.retrieve(
                 MemoryRetrieverInput(cat_id=request.cat_id, query=query, limit=5)
             ),
-            self._memory_writer.working_context(
-                request.cat_id, request.session_id, Corner.HEALTH
-            ),
-        )
+                self._memory_writer.working_context(
+                    request.cat_id, request.session_id, Corner.HEALTH
+                ),
+            )
+        record_retrieval_stages(vet_output.entries)
+        record_final_context(vet_output.entries)
+        record_consensus(vet_output.entries)
         if not vet_output.entries:
             fallback = no_reliable_information()
             session_id = await record_health_safely(
                 self._memory_writer, request, fallback.message
             )
-            return HealthChatResponse(session_id=session_id, result=fallback)
+            return HealthChatResponse(
+                session_id=session_id,
+                result=fallback,
+                generation_id=_generation_id(),
+            )
 
         context = _health_context(
             vet_output.entries, memory_output, session_context
@@ -144,15 +204,25 @@ class HealthOrchestrator:
             session_id = await record_health_safely(
                 self._memory_writer, request, fallback.message
             )
-            return HealthChatResponse(session_id=session_id, result=fallback)
+            return HealthChatResponse(
+                session_id=session_id,
+                result=fallback,
+                generation_id=_generation_id(),
+            )
 
         ids = {entry.entry_id for entry in vet_output.entries}
         evidence = [
             (entry.entry_id, _health_evidence(entry.entry))
             for entry in vet_output.entries
         ]
-        verdict = await self._groundedness.validate_health(draft, ids, evidence)
+        validation_timer = (
+            collector.stage_timer("validation") if collector else nullcontext()
+        )
+        with validation_timer:
+            verdict = await self._groundedness.validate_health(draft, ids, evidence)
         grounded = verdict.passed
+        if verdict.passed:
+            _set_groundedness(GroundednessOutcome.PASSED)
         if not verdict.passed:
             regenerated = await self._generate(
                 request,
@@ -167,6 +237,7 @@ class HealthOrchestrator:
                 if second.passed:
                     draft = regenerated
                     grounded = True
+                    _set_groundedness(GroundednessOutcome.REGENERATED)
                 else:
                     stripped = _strip_unsupported(
                         regenerated, second.unsupported_claims
@@ -179,9 +250,12 @@ class HealthOrchestrator:
                     ):
                         draft = stripped
                         grounded = True
+                        _set_groundedness(GroundednessOutcome.CLAIMS_STRIPPED)
                     else:
+                        _set_groundedness(GroundednessOutcome.FAILED_FELL_BACK)
                         draft = None
             else:
+                _set_groundedness(GroundednessOutcome.FAILED_FELL_BACK)
                 draft = None
 
         if not grounded or draft is None or not draft.claims:
@@ -189,13 +263,21 @@ class HealthOrchestrator:
             session_id = await record_health_safely(
                 self._memory_writer, request, fallback.message
             )
-            return HealthChatResponse(session_id=session_id, result=fallback)
+            return HealthChatResponse(
+                session_id=session_id,
+                result=fallback,
+                generation_id=_generation_id(),
+            )
 
         final = _dispose_health_draft(draft, vet_output.entries)
         session_id = await record_health_safely(
             self._memory_writer, request, final.message
         )
-        return HealthChatResponse(session_id=session_id, result=final)
+        return HealthChatResponse(
+            session_id=session_id,
+            result=final,
+            generation_id=_generation_id(),
+        )
 
     async def _generate(
         self,
@@ -235,7 +317,11 @@ class HealthOrchestrator:
             session_id = await record_health_safely(
                 self._memory_writer, request, fallback.message
             )
-            return HealthChatResponse(session_id=session_id, result=fallback)
+            return HealthChatResponse(
+                session_id=session_id,
+                result=fallback,
+                generation_id=_generation_id(),
+            )
         response = canned_response(response_id)
         logger.warning(
             "deterministic health safety gate fired cat_id=%s response_id=%s",
@@ -255,7 +341,11 @@ class HealthOrchestrator:
             result.message,
             compact=False,
         )
-        return HealthChatResponse(session_id=session_id, result=result)
+        return HealthChatResponse(
+            session_id=session_id,
+            result=result,
+            generation_id=_generation_id(),
+        )
 
 
 def _health_context(
@@ -402,3 +492,30 @@ def _format_health_source(
     label = f"[{entry_id}] {title} — {organization}"
     safe_url = safe_source_url(url)
     return f"{label}: {safe_url}" if safe_url else label
+
+
+def _generation_id() -> UUID | None:
+    """The in-flight generation's id, for echoing back to the client."""
+    collector = current_trace()
+    return None if collector is None else collector.generation_id
+
+
+def _record_red_flag(result: object) -> None:
+    """Record that the deterministic gate fired, and which rule matched.
+
+    Together with `model_call_count == 0` on the trace, this is the auditable
+    evidence that an emergency was answered without consulting a model.
+    """
+    collector = current_trace()
+    if collector is None:
+        return
+    collector.record_red_flag(
+        [str(rule) for rule in getattr(result, "matched_rules", [])],
+        getattr(result, "canned_response_id", None),
+    )
+
+
+def _set_groundedness(outcome: GroundednessOutcome) -> None:
+    collector = current_trace()
+    if collector is not None:
+        collector.set_groundedness(outcome)

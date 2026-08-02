@@ -14,6 +14,11 @@ from fastapi import status
 from app.db import Database
 from app.errors import APIErrorCode, APIErrorResponse, ApplicationError
 from app.ingestion.csv_loader import load_fun_facts
+from app.observability.repository import (
+    InMemoryTraceRepository,
+    PostgresTraceRepository,
+    TraceRepository,
+)
 from app.schemas.api import (
     AccountExportResponse,
     AuthSessionRequest,
@@ -104,6 +109,9 @@ class ApplicationRepository(Protocol):
         ...
 
     async def write_feedback(self, request: FeedbackRequest) -> FeedbackRecord:
+        ...
+
+    async def revoke_feedback(self, cat_id: UUID, feedback_id: UUID) -> bool:
         ...
 
     async def export_account(self, account_id: UUID) -> AccountExportResponse | None:
@@ -268,8 +276,13 @@ class DevelopmentAuthService:
 class PostgresApplicationRepository:
     """Explicit SQL implementation; cat-owned operations require cat_id."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(
+        self, database: Database, traces: "TraceRepository | None" = None
+    ) -> None:
         self._database = database
+        # Export must include generation traces: they hold the user's own
+        # queries and the answers served back, which makes them the user's data.
+        self._traces = traces or PostgresTraceRepository(database)
 
     async def list_cats(self, account_id: UUID) -> list[CatProfile]:
         rows = await self._database.fetch_all(
@@ -493,14 +506,29 @@ class PostgresApplicationRepository:
         )
 
     async def write_feedback(self, request: FeedbackRequest) -> FeedbackRecord:
+        """Record or replace the rating for one generation.
+
+        Feedback is editable, so re-rating the same generation updates the row
+        in place rather than accumulating contradictory rows. The unique index
+        on `generation_id` (migration 009) is what makes that an upsert; rows
+        with no generation id predate the client update and simply insert.
+        """
         row = await self._database.fetch_one(
             """
             INSERT INTO feedback (
-                cat_id, session_id, corner, thumb, helpfulness_score
+                cat_id, session_id, corner, thumb, helpfulness_score,
+                generation_id, reason, reason_text
             )
-            SELECT %s, id, %s, %s, %s
+            SELECT %s, id, %s, %s, %s, %s, %s, %s
             FROM sessions
             WHERE id = %s AND cat_id = %s
+            ON CONFLICT (generation_id) WHERE generation_id IS NOT NULL
+            DO UPDATE SET
+                thumb = EXCLUDED.thumb,
+                helpfulness_score = EXCLUDED.helpfulness_score,
+                reason = EXCLUDED.reason,
+                reason_text = EXCLUDED.reason_text,
+                updated_at = now()
             RETURNING *
             """,
             (
@@ -508,6 +536,9 @@ class PostgresApplicationRepository:
                 request.corner.value,
                 request.thumb.value,
                 request.helpfulness_score,
+                request.generation_id,
+                None if request.reason is None else request.reason.value,
+                request.reason_text,
                 request.session_id,
                 request.cat_id,
             ),
@@ -515,6 +546,16 @@ class PostgresApplicationRepository:
         if row is None:
             raise ValueError("cat-scoped feedback session not found")
         return FeedbackRecord.model_validate(row)
+
+    async def revoke_feedback(self, cat_id: UUID, feedback_id: UUID) -> bool:
+        """Withdraw a rating entirely. Scoped by cat so it cannot cross accounts."""
+        return (
+            await self._database.execute(
+                "DELETE FROM feedback WHERE id = %s AND cat_id = %s",
+                (feedback_id, cat_id),
+            )
+            == 1
+        )
 
     async def export_account(self, account_id: UUID) -> AccountExportResponse | None:
         account_row = await self._database.fetch_one(
@@ -571,6 +612,7 @@ class PostgresApplicationRepository:
             "SELECT * FROM feedback WHERE cat_id = ANY(%s) ORDER BY created_at",
             (cat_ids,),
         )
+        traces = await self._traces.for_cats(cat_ids)
         return AccountExportResponse(
             account=_account(account_row),
             cats=cats,
@@ -583,9 +625,18 @@ class PostgresApplicationRepository:
             ],
             moments=[Moment.model_validate(row) for row in scrapbook_rows],
             feedback=[FeedbackRecord.model_validate(row) for row in feedback_rows],
+            generation_traces=traces,
         )
 
     async def delete_account(self, account_id: UUID) -> bool:
+        """Delete the account and everything that hangs off it.
+
+        Generation traces are removed by the database: `generation_traces.cat_id`
+        is `REFERENCES cats (id) ON DELETE CASCADE` (migration 009) and cats
+        cascade from accounts, so traces cannot outlive the account that
+        produced them. `tests/test_generation_tracing.py` asserts this rather
+        than trusting the schema comment.
+        """
         return (
             await self._database.execute(
                 "DELETE FROM accounts WHERE id = %s", (account_id,)
@@ -603,7 +654,9 @@ class PostgresApplicationRepository:
 class InMemoryApplicationRepository:
     """Development repository with the same account/cat ownership boundaries."""
 
-    def __init__(self, account: Account) -> None:
+    def __init__(
+        self, account: Account, traces: TraceRepository | None = None
+    ) -> None:
         self.account = account
         self.deleted = False
         self.cats: dict[UUID, CatProfile] = {}
@@ -612,6 +665,7 @@ class InMemoryApplicationRepository:
         self.feedback: list[FeedbackRecord] = []
         self.sessions: list[SessionMemory] = []
         self.long_term: list[LongTermMemory] = []
+        self.traces: TraceRepository = traces or InMemoryTraceRepository()
 
     async def list_cats(self, account_id: UUID) -> list[CatProfile]:
         return (
@@ -723,13 +777,44 @@ class InMemoryApplicationRepository:
         return len(kept) != len(items)
 
     async def write_feedback(self, request: FeedbackRequest) -> FeedbackRecord:
+        """Record or replace the rating for one generation.
+
+        Mirrors the Postgres upsert: re-rating the same generation edits the
+        existing row rather than leaving two contradictory ratings behind.
+        """
+        now = datetime.now(timezone.utc)
+        if request.generation_id is not None:
+            for index, existing in enumerate(self.feedback):
+                if existing.generation_id == request.generation_id:
+                    self.feedback[index] = existing.model_copy(
+                        update={
+                            "thumb": request.thumb,
+                            "reason": request.reason,
+                            "reason_text": request.reason_text,
+                            "helpfulness_score": request.helpfulness_score,
+                            "updated_at": now,
+                        }
+                    )
+                    return self.feedback[index]
         record = FeedbackRecord(
             **request.model_dump(),
             id=uuid4(),
-            created_at=datetime.now(timezone.utc),
+            created_at=now,
+            updated_at=now,
         )
         self.feedback.append(record)
         return record
+
+    async def revoke_feedback(self, cat_id: UUID, feedback_id: UUID) -> bool:
+        """Withdraw a rating entirely, scoped by cat."""
+        remaining = [
+            item
+            for item in self.feedback
+            if not (item.id == feedback_id and item.cat_id == cat_id)
+        ]
+        removed = len(remaining) != len(self.feedback)
+        self.feedback[:] = remaining
+        return removed
 
     async def export_account(self, account_id: UUID) -> AccountExportResponse | None:
         if self.deleted or account_id != self.account.id:
@@ -743,16 +828,31 @@ class InMemoryApplicationRepository:
                 item for items in self.scrapbook.values() for item in items
             ],
             feedback=self.feedback,
+            generation_traces=await self.traces.for_cats(list(self.cats)),
         )
 
     async def delete_account(self, account_id: UUID) -> bool:
+        """Erase everything the account owns, generation traces included.
+
+        Production relies on `ON DELETE CASCADE` for the trace rows; this path
+        has no database, so the equivalent removal is explicit. Both are
+        asserted in `tests/test_generation_tracing.py` so the two
+        implementations cannot diverge on what "delete my account" means.
+        """
         if self.deleted or account_id != self.account.id:
             return False
+        cat_ids = set(self.cats)
         self.cats.clear()
         self.scrapbook.clear()
         self.feedback.clear()
         self.sessions.clear()
         self.long_term.clear()
+        traces = getattr(self.traces, "traces", None)
+        if isinstance(traces, dict):
+            for generation_id in [
+                key for key, trace in traces.items() if trace.cat_id in cat_ids
+            ]:
+                del traces[generation_id]
         self.deleted = True
         return True
 

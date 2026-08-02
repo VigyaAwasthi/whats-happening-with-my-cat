@@ -9,12 +9,14 @@
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/images.test.mjs",
+    "test:heic": "esbuild lib/images.ts --bundle --format=esm --outfile=tests/heic-browser/images.js --loader:.ts=ts && cp tests/fixtures/real-photo.heic tests/heic-browser/ && echo 'Open http://localhost:8199/ — title becomes HEIC OK or HEIC FAILED' && python3 -m http.server 8199 --directory tests/heic-browser",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",
     "clsx": "^2.1.1",
+    "heic2any": "^0.0.4",
     "lenis": "^1.3.25",
     "lucide-react": "^1.27.0",
     "motion": "^12.43.0",

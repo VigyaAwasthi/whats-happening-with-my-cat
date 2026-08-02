@@ -4,11 +4,28 @@ import asyncio
 import logging
 import re
 from collections.abc import Sequence
+from contextlib import nullcontext
 from uuid import UUID
 
 from app.llm.client import ModelPurpose, StructuredLLMClient
 from app.memory.service import CatMemoryService
-from app.prompts.v1 import BEHAVIOR_SYSTEM_PROMPT_V1, HEALTH_SIGNAL_SYSTEM_PROMPT_V1
+from app.observability.collector import TraceCollector, current_trace, trace_scope
+from app.observability.recording import (
+    record_consensus,
+    record_final_context,
+    record_retrieval_stages,
+)
+from app.observability.repository import (
+    InMemoryTraceRepository,
+    TraceRepository,
+    write_trace_safely,
+)
+from app.prompts.v1 import (
+    BEHAVIOR_PROMPT_VERSION,
+    BEHAVIOR_SYSTEM_PROMPT_V1,
+    HEALTH_SIGNAL_SYSTEM_PROMPT_V1,
+)
+from app.schemas.trace import GroundednessOutcome, RetrievalConsensus
 from app.safety.groundedness import CompositeGroundednessValidator
 from app.safety.red_flags import DeterministicRedFlagChecker, canned_response
 from app.schemas.api import BehaviorChatRequest, BehaviorChatResponse
@@ -52,8 +69,10 @@ class BehaviorOrchestrator:
         memory_writer: CatMemoryService,
         red_flags: DeterministicRedFlagChecker,
         groundedness: CompositeGroundednessValidator,
+        traces: TraceRepository | None = None,
     ) -> None:
         self._llm = llm
+        self._traces = traces or InMemoryTraceRepository()
         self._fast_model = fast_model
         self._behavior_model = behavior_model
         self._high_threshold = health_signal_threshold
@@ -67,48 +86,84 @@ class BehaviorOrchestrator:
         self._groundedness = groundedness
 
     async def handle(self, request: BehaviorChatRequest) -> BehaviorChatResponse:
-        try:
-            return await self._handle(request)
-        except Exception:
-            logger.exception("behavior orchestration failed closed")
-            return BehaviorChatResponse(
-                session_id=request.session_id, result=_behavior_fallback()
+        collector = TraceCollector(
+            cat_id=request.cat_id,
+            session_id=request.session_id,
+            corner=Corner.BEHAVIOR,
+            query=request.message,
+        )
+        with trace_scope(collector):
+            try:
+                response = await self._handle(request)
+            except Exception:
+                logger.exception("behavior orchestration failed closed")
+                response = BehaviorChatResponse(
+                    session_id=request.session_id,
+                    result=_behavior_fallback(),
+                    generation_id=collector.generation_id,
+                )
+            collector.set_outcome(
+                answer_mode=response.result.answer_mode.value,
+                response_text=response.result.interpretation,
+                prompt_version=BEHAVIOR_PROMPT_VERSION,
             )
+            # Persisting the trace is observational and comes after the answer
+            # is fully formed. `write_trace_safely` cannot raise, whatever
+            # repository is installed, so no trace fault can fail a request.
+            await write_trace_safely(self._traces, collector.build())
+            return response
 
     async def _handle(self, request: BehaviorChatRequest) -> BehaviorChatResponse:
         red_flag = self._red_flags.check_raw(request.message)
         if red_flag.matched_rules:
+            _record_red_flag(red_flag)
             return await self._nudge(request, red_flag.canned_response_id)
 
-        signal, behavior_output, memory_output, session_context = await asyncio.gather(
-            self._llm.generate(
-                HealthSignalCheck,
-                model=self._fast_model,
-                purpose=ModelPurpose.FAST,
-                system_prompt=HEALTH_SIGNAL_SYSTEM_PROMPT_V1,
-                cache_context="",
-                user_prompt=request.message,
-                max_tokens=300,
-            ),
-            self._behavior.retrieve(
-                BehaviorKnowledgeRetrieverInput(
-                    query=request.message, cat_id=request.cat_id
-                )
-            ),
-            self._memory.retrieve(
-                MemoryRetrieverInput(
-                    query=request.message, cat_id=request.cat_id, limit=5
-                )
-            ),
-            self._memory_writer.working_context(
-                request.cat_id, request.session_id, Corner.BEHAVIOR
-            ),
+        collector = current_trace()
+        retrieval_timer = (
+            collector.stage_timer("retrieval") if collector else nullcontext()
         )
+        with retrieval_timer:
+            (
+                signal,
+                behavior_output,
+                memory_output,
+                session_context,
+            ) = await asyncio.gather(
+                self._llm.generate(
+                    HealthSignalCheck,
+                    model=self._fast_model,
+                    purpose=ModelPurpose.FAST,
+                    system_prompt=HEALTH_SIGNAL_SYSTEM_PROMPT_V1,
+                    cache_context="",
+                    user_prompt=request.message,
+                    max_tokens=300,
+                ),
+                self._behavior.retrieve(
+                    BehaviorKnowledgeRetrieverInput(
+                        query=request.message, cat_id=request.cat_id
+                    )
+                ),
+                self._memory.retrieve(
+                    MemoryRetrieverInput(
+                        query=request.message, cat_id=request.cat_id, limit=5
+                    )
+                ),
+                self._memory_writer.working_context(
+                    request.cat_id, request.session_id, Corner.BEHAVIOR
+                ),
+            )
+        record_retrieval_stages(behavior_output.entries)
         grounded_entries = _entries_with_grounding_evidence(
             request.message,
             behavior_output.entries,
             minimum_coverage=self._min_query_coverage,
             minimum_terms=self._min_query_terms,
+        )
+        record_final_context(grounded_entries)
+        record_consensus(
+            behavior_output.entries,
+            coverage_ratio=_coverage_ratio(request.message, behavior_output.entries),
         )
         advisory_flag = _classifier_advisory_flag(
             request.message,
@@ -128,15 +183,19 @@ class BehaviorOrchestrator:
             session_context,
             answer_mode=answer_mode,
         )
-        generated = await self._llm.generate(
-            BehaviorInterpretation,
-            model=self._behavior_model,
-            purpose=ModelPurpose.BEHAVIOR,
-            system_prompt=BEHAVIOR_SYSTEM_PROMPT_V1,
-            cache_context=context,
-            user_prompt=request.message,
-            max_tokens=1200,
+        generation_timer = (
+            collector.stage_timer("generation") if collector else nullcontext()
         )
+        with generation_timer:
+            generated = await self._llm.generate(
+                BehaviorInterpretation,
+                model=self._behavior_model,
+                purpose=ModelPurpose.BEHAVIOR,
+                system_prompt=BEHAVIOR_SYSTEM_PROMPT_V1,
+                cache_context=context,
+                user_prompt=request.message,
+                max_tokens=1200,
+            )
         if generated.value is None:
             result = (
                 _source_fallback(grounded_entries[0].entry)
@@ -146,7 +205,11 @@ class BehaviorOrchestrator:
             if advisory_flag is not None:
                 result = _with_medical_advisory(result, advisory_flag)
             session_id = await self._record(request, result)
-            return BehaviorChatResponse(session_id=session_id, result=result)
+            return BehaviorChatResponse(
+            session_id=session_id,
+            result=result,
+            generation_id=_generation_id(),
+        )
 
         result = generated.value
         model_requested_advisory = result.medical_nudge
@@ -204,19 +267,29 @@ class BehaviorOrchestrator:
                     ]
                 }
             )
-            verdict = await self._groundedness.validate(
-                GroundednessValidatorInput(
-                    draft_answer=f"{result.interpretation}\n{result.reasoning}",
-                    retrieved_entries=[
-                        GroundingEvidence(
-                            entry_id=ranked.entry_id, text=ranked.entry.summary
-                        )
-                        for ranked in grounded_entries
-                    ],
-                )
+            validation_timer = (
+                collector.stage_timer("validation") if collector else nullcontext()
             )
+            with validation_timer:
+                verdict = await self._groundedness.validate(
+                    GroundednessValidatorInput(
+                        draft_answer=f"{result.interpretation}\n{result.reasoning}",
+                        retrieved_entries=[
+                            GroundingEvidence(
+                                entry_id=ranked.entry_id, text=ranked.entry.summary
+                            )
+                            for ranked in grounded_entries
+                        ],
+                    )
+                )
             if verdict.verdict is None or not verdict.verdict.passed:
+                # Degrading to the source wording is a groundedness failure that
+                # the user never sees. Without this in the trace, the answer
+                # looks like an ordinary corpus-grounded response.
+                _set_groundedness(GroundednessOutcome.FAILED_FELL_BACK)
                 result = _source_fallback(grounded_entries[0].entry)
+            else:
+                _set_groundedness(GroundednessOutcome.PASSED)
 
         if advisory_flag is None and model_requested_advisory:
             advisory_flag = _model_advisory_flag(request.message, grounded_entries)
@@ -224,7 +297,11 @@ class BehaviorOrchestrator:
             result = _with_medical_advisory(result, advisory_flag)
 
         session_id = await self._record(request, result)
-        return BehaviorChatResponse(session_id=session_id, result=result)
+        return BehaviorChatResponse(
+            session_id=session_id,
+            result=result,
+            generation_id=_generation_id(),
+        )
 
     async def _nudge(
         self, request: BehaviorChatRequest, response_id: str | None
@@ -247,7 +324,11 @@ class BehaviorOrchestrator:
             medical_nudge=True,
         )
         session_id = await self._record(request, result, compact=False)
-        return BehaviorChatResponse(session_id=session_id, result=result)
+        return BehaviorChatResponse(
+            session_id=session_id,
+            result=result,
+            generation_id=_generation_id(),
+        )
 
     async def _record(
         self,
@@ -268,6 +349,43 @@ class BehaviorOrchestrator:
         except Exception:
             logger.exception("behavior memory write failed without affecting response")
             return request.session_id
+
+
+def _generation_id() -> UUID | None:
+    """The in-flight generation's id, for echoing back to the client."""
+    collector = current_trace()
+    return None if collector is None else collector.generation_id
+
+
+def _record_red_flag(red_flag: object) -> None:
+    """Note that the deterministic gate fired, and which rule matched.
+
+    Paired with `model_call_count == 0` in the trace, this is the auditable
+    proof that an emergency short-circuited before any model was consulted.
+    """
+    collector = current_trace()
+    if collector is None:
+        return
+    collector.record_red_flag(
+        [str(rule) for rule in getattr(red_flag, "matched_rules", [])],
+        getattr(red_flag, "canned_response_id", None),
+    )
+
+
+def _set_groundedness(outcome: GroundednessOutcome) -> None:
+    collector = current_trace()
+    if collector is not None:
+        collector.set_groundedness(outcome)
+
+
+def _coverage_ratio(
+    query: str, entries: Sequence[RankedBehaviorEntry]
+) -> float | None:
+    """Deterministic term coverage of the top entry, for the trace only."""
+    if not entries:
+        return None
+    matched, total = _query_entry_term_matches(query, entries[0].entry)
+    return (matched / total) if total else None
 
 
 def _behavior_context(
